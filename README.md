@@ -24,7 +24,9 @@
 
 ### 在线使用
 
-将 `dist/` 发布到静态网站托管后，访问者直接打开公开链接即可使用。文件只在当前浏览器标签页内处理，静态服务器不提供生成 API，也不保存上传内容。浏览器需支持 ES modules、DOMParser 和 `DecompressionStream('deflate-raw')`，建议使用最新版 Chrome、Edge 或 Safari。
+**[打开 SmartPPT 在线版](https://c-uso4.github.io/SmartPPT/)**，无需登录、安装或启动本地服务。文件只在当前浏览器标签页内处理，GitHub Pages 不提供生成 API，也不保存上传内容。
+
+浏览器需支持 ES modules、DOMParser 和 `DecompressionStream('deflate-raw')`，建议使用最新版 Chrome、Edge 或 Safari。公开部署与验收记录见 [部署说明](docs/DEPLOYMENT.md)。
 
 ### 构建在线站点
 
@@ -67,7 +69,7 @@ Windows 若没有 `python` 命令，可将上述命令替换为 `py -3`。
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
-node --test tests/web.test.cjs
+node --test tests/web.test.cjs tests/online-static.test.cjs
 ```
 
 测试覆盖混合编号大纲、DOCX 标题与表格、PPTX 实际页序、默认字号、SmartArt、长目录边界、来源目录匹配合并、真实 PPT 回转不膨胀、自定义目录保留、卡片序号与品牌装饰识别、OOXML 结构和保真审计，以及真实 HTTP 兼容回归与在线静态构建完整性。网页测试会启动独立服务并使用临时任务目录，不需要第三方测试框架。

@@ -19,7 +19,15 @@ node scripts/build-online.cjs
 
 建议启用 HTTPS。服务器需以 JavaScript MIME 类型返回 `.js`，并允许浏览器获取 `.pptx` 与 `.md` 静态资源；不需要目录列表、服务端重写或跨域上传规则。`DOMParser` 在部分浏览器的 Worker 中不可用，因此当前版本在标签页主线程执行，不应把引擎直接移入 Worker。网站可以从任何现代静态托管服务发布，不限定特定云厂商。
 
-### 当前 Qoder Sites 交付状态（2026-11-19）
+### GitHub Pages 公开交付（2026-11-19）
+
+公开入口：**https://c-uso4.github.io/SmartPPT/**。仓库 `C-uSO4/SmartPPT` 为 Public，Pages 使用 `gh-pages` 分支的 `/ (root)`，无需账号即可访问。`main` 保存源码，`gh-pages` 只保存 `dist/` 的构建结果；更新公开网页时先重新构建，再分别提交并推送两个分支。
+
+本次已在公开地址实际完成示例生成：6 页、18/18 条原文匹配，核心流程 66 ms，5 处平滑切换；页面无控制台错误，全部静态模块、示例和 PPTX 基础包均从 `/SmartPPT/` 子路径成功加载。下载 Blob 为 145,363 字节，独立 ZIP/XML 回读确认 31 个条目、6 页幻灯片、69 个原生文本块，CRC 与 XML 解析错误均为 0，并包含 5 页 Morph by Object 和 5 页非黑场 Fade。
+
+匿名 HTTP 请求已确认首页返回 200。公开地址产物已完成浏览器生成与 ZIP/XML 验收；本机 WPS 打开、逐页导出和真实播放记录见使用说明，不把关键时刻抓帧解释为所有 WPS／PowerPoint 版本的兼容性保证。
+
+### 历史 Qoder Sites 私有交付（2026-11-19）
 
 `https://smart-ppt-studio-zbuekdpk36v.qoder.zone` 已发布，但当前访问策略为 `private`。平台本次返回的可用模式只有 `private`、`selected` 和 `organization`，没有免登录的 `public` 模式；未登录访客会被引导至 Qoder／阿里云登录。因此该地址目前只能作为私有部署结果，不能称为可公开分享的在线入口。
 
