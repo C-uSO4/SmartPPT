@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FORM — 智能美化 PPT</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="FORM 首页"><span class="brand-mark"></span><span>FORM</span><small>智能美化引擎</small></a>
+    <div class="local-status"><span></span>在线使用 · 无需安装 · 文件仅在浏览器处理</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">CONTENT BECOMES FORM</p>
+        <h1>把大纲，变成<br><em>有叙事力的 PPT。</em></h1>
+      </div>
+      <div class="hero-note">
+        <p>打开网页即可生成，无需启动本地服务。保留原文与数字，文字、形状和动画时间线直接写入 PPTX，在 WPS 中继续编辑。</p>
+        <div class="hero-tags"><span>内容保真</span><span>原生可编辑</span><span>Morph + Fade</span></div>
+      </div>
+    </section>
+
+    <section class="studio">
+      <aside class="control-panel">
+        <div class="panel-heading"><span>01</span><h2>选择内容</h2></div>
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="上传大纲或初代 PPT">
+          <input id="fileInput" type="file" accept=".docx,.md,.markdown,.txt,.pptx" hidden>
+          <div class="upload-symbol"><span></span><span></span></div>
+          <strong>拖入大纲或初代 PPT</strong>
+          <p>DOCX · Markdown · TXT · PPTX</p>
+          <button type="button" class="text-button">浏览文件</button>
+        </div>
+        <div id="fileCard" class="file-card hidden">
+          <div class="file-type" id="fileType">MD</div>
+          <div><strong id="fileName"></strong><span id="fileSize"></span></div>
+          <button id="removeFile" aria-label="移除文件">×</button>
+        </div>
+        <button id="sampleButton" class="sample-button" type="button">没有文件？使用示例大纲</button>
+        <div class="asset-picker"><label for="assetInput">图片素材（可选，最多 12 张）</label><input id="assetInput" type="file" accept=".png,.jpg,.jpeg" multiple><span id="assetNames">Markdown 中按文件名引用 PNG/JPEG</span></div>
+
+        <div class="engine-note">
+          <span class="note-index">02</span>
+          <div class="engine-options"><h3>本次生成</h3><label for="styleSelect">视觉风格</label><select id="styleSelect"><option value="paper">纸感编辑</option><option value="midnight">深色发布会</option><option value="azure">清透商务</option></select><p>按内容选择版式 · 章节游标平滑切换<br>备注不进入页面 · 原文逐条回读</p></div>
+        </div>
+        <button id="generateButton" class="generate-button" type="button" disabled>
+          <span>生成智能美化 PPT</span><span class="arrow">→</span>
+        </button>
+        <p class="limit-note">文件只在当前浏览器标签页内解析和生成，不上传到服务器。PPTX 入口重建文字与结构，不保留原模板、母版和原图。</p>
+
+        <ol id="pipeline" class="pipeline hidden">
+          <li data-stage="parsing"><span></span><div>理解内容<small>标题、层级、数字与来源</small></div></li>
+          <li data-stage="rendering"><span></span><div>规划并生成<small>语义版式与原生动画</small></div></li>
+          <li data-stage="auditing"><span></span><div>保真校验<small>逐条回读，遗漏即阻断</small></div></li>
+        </ol>
+      </aside>
+
+      <section class="workspace">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-composition" aria-hidden="true">
+            <div class="sheet sheet-back"></div><div class="sheet sheet-mid"></div>
+            <div class="sheet sheet-front"><span></span><span></span><span></span><b>01</b></div>
+            <div class="orbit"></div>
+          </div>
+          <p class="eyebrow">YOUR STORY, IN FORM</p>
+          <h2>从真实内容开始，<br>而不是从模板开始。</h2>
+          <p>生成后可在这里浏览页面、检查每条原文，并下载 PPTX。</p>
+        </div>
+
+        <div id="resultState" class="result-state hidden">
+          <div class="result-header">
+            <div><p class="eyebrow">GENERATED DECK</p><h2 id="deckTitle"></h2><p id="deckMeta"></p></div>
+            <a id="downloadButton" class="download-button" href="#">下载 PPTX <span>↓</span></a>
+          </div>
+          <div class="metrics">
+            <div><strong id="metricFidelity">100%</strong><span>原文匹配</span></div>
+            <div><strong id="metricPages"></strong><span>生成页数</span></div>
+            <div><strong id="metricTime"></strong><span>核心流程耗时</span></div>
+            <div><strong id="metricMotion"></strong><span>平滑切换</span></div>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="preview" role="tab">页面预览</button>
+            <button class="tab" data-tab="audit" role="tab">内容对账</button>
+            <button class="tab" data-tab="timing" role="tab">耗时分析</button>
+          </div>
+          <div id="previewTab" class="tab-panel">
+            <div class="preview-layout">
+              <div id="thumbnails" class="thumbnails"></div>
+              <div class="stage-area">
+                <div id="slideFrame" class="slide-frame"><div id="slideCanvas" class="slide-canvas"></div></div>
+                <div class="stage-caption"><span id="slideCaption"></span><span>WPS：Morph + 非黑场 Fade 降级</span></div>
+              </div>
+            </div>
+          </div>
+          <div id="auditTab" class="tab-panel hidden">
+            <div class="audit-summary"><span class="pass-dot"></span><strong id="auditSummary"></strong><span id="decorationSummary"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>来源</th><th>原文</th><th>数字</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
+          </div>
+          <div id="timingTab" class="tab-panel hidden">
+            <div class="timing-intro"><h3>耗时花在真正需要的地方</h3><p>页面在当前浏览器标签页中直接编译为 OOXML，不经过本地生成服务或 Office MCP。所有数值均来自本次运行。</p></div>
+            <div id="timingBars" class="timing-bars"></div>
+            <div class="optimization-card"><strong>本轮优化</strong><p>解析、规划、原生对象写入与动画注入一次完成；后续页面规划可并行，PPTX 装配继续单点串行。</p></div>
+          </div>
+        </div>
+        <div id="errorState" class="error-state hidden"><strong>这次没有生成完成</strong><p id="errorMessage"></p><button id="retryButton">修改文件后重试</button></div>
+      </section>
+    </section>
+
+    <section class="principles">
+      <div><span>01</span><h3>不改写事实</h3><p>保留标题层级、数字与来源位置，不用“更漂亮”的理由补写内容。</p></div>
+      <div><span>02</span><h3>不输出整页截图</h3><p>正文、标签、卡片和章节游标都是 PowerPoint 原生对象。</p></div>
+      <div><span>03</span><h3>不止检查文件结构</h3><p>内容对账是生成门槛，WPS 真实播放是交付前的独立验收。</p></div>
+    </section>
+  </main>
+  <footer><span>FORM / ONLINE</span><span>浏览器内生成 · 无视频 · 无外部字体依赖 · 无第三方运行库</span></footer>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "smartppt",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Online, dependency-free PPT outline parsing, native PPTX generation and fidelity auditing in the browser",
+  "scripts": {
+    "start": "node src/web/server.js",
+    "build": "node scripts/build-online.cjs",
+    "test": "node --test tests/web.test.cjs tests/online-static.test.cjs",
+    "test:core": "python -m unittest discover -s tests -p test_*.py"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
