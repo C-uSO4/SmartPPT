@@ -1,6 +1,6 @@
 import { parseDocument, makeModel, parseVisualTemplate } from './parser.js';
 import { planPages } from './layout.js';
-import { renderPackage, verifyPackage, auditPackage } from './pptx.js';
+import { renderPackage, renderTemplatePackage, verifyPackage, auditPackage } from './pptx.js';
 import { analyzeBlockRoles, applyBlockRoles } from './ai.js';
 
 const elapsed = started => (performance.now() - started) / 1000;
@@ -103,9 +103,11 @@ export async function generateDeck({
   const planJsonWriteSeconds = elapsed(jsonStarted);
 
   onProgress('rendering');
-  const shell = await shellBytes();
+  const shell = visualTemplate ? null : await shellBytes();
   const writeStarted = performance.now();
-  const { bytes, fadeCount } = await renderPackage(job, shell);
+  const { bytes, fadeCount } = visualTemplate
+    ? await renderTemplatePackage(job, templateBytes)
+    : await renderPackage(job, shell);
   const writeSeconds = elapsed(writeStarted);
 
   onProgress('auditing');
@@ -130,8 +132,10 @@ export async function generateDeck({
       bodyFont: visualTemplate.fonts.body,
       coverBackground: visualTemplate.cover.image ? 'image' : 'color',
       contentBackground: visualTemplate.content.image ? 'image' : 'color',
+      layoutCount: visualTemplate.candidates.length,
+      usedLayoutCount: new Set(pages.map(page => page.plan.template.slidePart)).size,
       warnings: visualTemplate.warnings,
-      limitations: '不复制模板母版 Logo、装饰形状、原始版式与原始动画，也不生成可复用母版。',
+      limitations: '下载稿保留所选模板页的母版、版式、装饰与媒体；网页预览为真实槽位的近似展示。模板原始动画会替换为当前切换与入场效果，不生成可复用母版。',
     } : null,
     noteCount: notes.length,
     pageCount: pages.length,

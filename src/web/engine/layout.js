@@ -536,9 +536,9 @@ function importedFontSize(item, box) {
 
 function importedLayoutBoxes(items) {
   const boxes = new Map(items.map(item => [item.id, importedBox(item)]));
-  const labels = items.filter(item => item.kind !== 'image' && item.kind !== 'table'
+  const labels = items.filter(item => item.kind === 'heading'
     && (item.font_size || 0) >= 24 && !String(item.text).includes('\n')
-    && codePointLength(clean(item.text)) <= 8);
+    && codePointLength(clean(item.text)) <= 30);
   const groups = [];
   const groupedBodies = new Set();
   const groupedLabels = new Set();
@@ -740,6 +740,127 @@ function importedContentPage(plan, pageNumber, motion, fade, visualPage = null) 
   return { background: THEME.background, elements };
 }
 
+function templatePlanItems(plan, model) {
+  if (plan.kind === 'cover') return model.lead;
+  if (plan.kind === 'overview') {
+    return plan.overview_sections.map(section => ({
+      id: section.heading_id,
+      kind: 'paragraph',
+      text: section.title,
+      numbers: [],
+    }));
+  }
+  return plan.items;
+}
+
+function templateTextGroups(items, slots) {
+  if (!items.length) return [];
+  if (!slots.length) return null;
+  const groups = items.map(item => ({ ...item, kind: 'text' }));
+  while (groups.length > slots.length) {
+    let bestIndex = 0;
+    let bestLength = Infinity;
+    for (let index = 0; index < groups.length - 1; index += 1) {
+      const length = codePointLength(groups[index].text) + codePointLength(groups[index + 1].text);
+      if (length < bestLength) {
+        bestLength = length;
+        bestIndex = index;
+      }
+    }
+    const merged = {
+      ...groups[bestIndex],
+      text: `${groups[bestIndex].text}\n${groups[bestIndex + 1].text}`,
+    };
+    groups.splice(bestIndex, 2, merged);
+  }
+  return groups;
+}
+
+function templateAssignment(candidate, items) {
+  if (!candidate.title) return null;
+  const bodySlots = candidate.bodySlots.map(slot => ({ ...slot }));
+  const pictureSlots = candidate.pictureSlots.map(slot => ({ ...slot }));
+  const tableSlots = candidate.tableSlots.map(slot => ({ ...slot }));
+  const assignments = [];
+  const textItems = [];
+  for (const item of items) {
+    if (!['image', 'table'].includes(item.kind)) {
+      textItems.push(item);
+      continue;
+    }
+    const slot = item.kind === 'image'
+      ? pictureSlots.shift() || bodySlots.shift()
+      : tableSlots.shift() || bodySlots.shift();
+    if (!slot || (item.kind === 'image' && !item.asset)) return null;
+    assignments.push({ ...item, slot, slotKind: slot.kind });
+  }
+  const groups = templateTextGroups(textItems, bodySlots);
+  if (groups === null) return null;
+  groups.forEach((item, index) => assignments.push({ ...item, slot: bodySlots[index], slotKind: 'body' }));
+  let shrinkPenalty = 0;
+  for (const assignment of assignments) {
+    if (assignment.kind !== 'text') continue;
+    const size = fitFontSize(assignment.text, assignment.slot.width * 0.9, assignment.slot.height * 0.9,
+      Math.min(28, assignment.slot.fontSize || 18), 10, BODY_LINE_SPACING);
+    assignment.fontSize = size;
+    shrinkPenalty += Math.max(0, Math.min(28, assignment.slot.fontSize || 18) - size);
+  }
+  const titleAssignment = { kind: 'title', text: '', slot: candidate.title, slotKind: 'title' };
+
+  const usedSlotIds = new Set(assignments.map(item => item.slot.id));
+  const clearShapeIds = candidate.contentTextIds.filter(id => !usedSlotIds.has(id));
+  const score = shrinkPenalty * 3 + Math.max(0, bodySlots.length - groups.length) * 0.2;
+  return { candidate, titleAssignment, assignments, clearShapeIds, score };
+}
+
+function selectTemplateAssignment(plan, items, visualTemplate) {
+  const candidates = visualTemplate.candidates || [];
+  const ordered = plan.kind === 'cover'
+    ? candidates
+    : candidates.filter(candidate => candidate.slideNumber !== 1).concat(candidates.filter(candidate => candidate.slideNumber === 1));
+  let best = null;
+  for (const candidate of ordered) {
+    const assignment = templateAssignment(candidate, items);
+    if (!assignment) continue;
+    assignment.score += plan.kind === 'cover' ? Math.max(0, candidate.slideNumber - 1) * 8 : (candidate.slideNumber === 1 ? 8 : 0);
+    if (!best || assignment.score < best.score) best = assignment;
+  }
+  if (!best) {
+    throw new Error(`模板没有能容纳“${plan.title}”的真实标题与正文区域，请使用包含合适内容版面的 PPT 模板`);
+  }
+  best.titleAssignment.text = plan.title;
+  best.titleAssignment.fontSize = fitFontSize(plan.title, best.titleAssignment.slot.width * 0.9,
+    best.titleAssignment.slot.height * 0.9, best.titleAssignment.slot.fontSize || 32, 12, 110);
+  return best;
+}
+
+function templatePreviewPage(selection, visualPage) {
+  const elements = backgroundElements(visualPage);
+  const fade = [];
+  const all = [selection.titleAssignment, ...selection.assignments];
+  for (const assignment of all) {
+    const slot = assignment.slot;
+    if (assignment.kind === 'image') {
+      fade.push(elements.length);
+      elements.push(image(assignment.asset, slot.left, slot.top, slot.width, slot.height, assignment.text));
+      continue;
+    }
+    if (assignment.kind === 'table') {
+      const box = { x: slot.left, y: slot.top, w: slot.width, h: slot.height };
+      const start = elements.length;
+      renderImportedTable(assignment, elements, box, new Map());
+      for (let index = start; index < elements.length; index += 1) fade.push(index);
+      continue;
+    }
+    fade.push(elements.length);
+    elements.push(text(slot.left, slot.top, slot.width, slot.height, assignment.text,
+      assignment.fontSize || slot.fontSize || 18, THEME.ink, assignment.kind === 'title', 'left', 10,
+      assignment.kind === 'title' ? 110 : BODY_LINE_SPACING, 1,
+      assignment.kind === 'title' ? TITLE_FONT : FONT));
+  }
+  return [{ background: THEME.background, elements, templatePreview: true }, fade];
+}
+
 export function planPages(model, style = 'paper', visualTemplate = null) {
   if (!Object.prototype.hasOwnProperty.call(THEMES, style)) throw new Error(`未知主题：${style}`);
   const baseTheme = { ...THEMES[style] };
@@ -819,7 +940,17 @@ export function planPages(model, style = 'paper', visualTemplate = null) {
     const motion = [];
     let fade = [];
     let page;
-    if (plan.kind === 'cover') {
+    if (visualTemplate) {
+      const selection = selectTemplateAssignment(plan, templatePlanItems(plan, model), visualTemplate);
+      plan.template = {
+        slidePart: selection.candidate.slidePart,
+        title: selection.titleAssignment,
+        assignments: selection.assignments,
+        clearShapeIds: selection.clearShapeIds,
+        fadeShapeIds: [selection.titleAssignment, ...selection.assignments].map(assignment => assignment.slot.id),
+      };
+      [page, fade] = templatePreviewPage(selection, visualPage);
+    } else if (plan.kind === 'cover') {
       [page, fade] = coverPage(model, visualPage);
     } else if (plan.kind === 'overview') {
       [page, fade] = overviewPage(plan.overview_sections, plan.overview_start, overviewSections.length, plan.overview_title, plan.overview_count, visualPage);

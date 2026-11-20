@@ -251,6 +251,267 @@ function updateContentTypes(source, pages) {
   return contentTypes;
 }
 
+function serializeXml(document) {
+  if (typeof XMLSerializer !== 'function') throw pptxError('当前浏览器不支持 XMLSerializer，无法写入模板 PPTX');
+  const source = new XMLSerializer().serializeToString(document).replace(/^<\?xml[\s\S]*?\?>/, '');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${source}`;
+}
+
+function partRelationshipsName(part) {
+  const slash = part.lastIndexOf('/');
+  return `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
+}
+
+function addRelationship(document, type, target) {
+  const root = document.documentElement;
+  let largest = 0;
+  for (const relation of Array.from(root.childNodes)) {
+    if (relation.nodeType !== 1) continue;
+    const match = /^rId(\d+)$/.exec(relation.getAttribute('Id') || '');
+    if (match) largest = Math.max(largest, Number(match[1]));
+  }
+  const id = `rId${largest + 1}`;
+  const relation = document.createElementNS(RELATIONSHIPS, 'Relationship');
+  relation.setAttribute('Id', id);
+  relation.setAttribute('Type', type);
+  relation.setAttribute('Target', target);
+  root.appendChild(relation);
+  return id;
+}
+
+function shapeById(document, id) {
+  const properties = elementsNs(document, P, 'cNvPr').find(node => node.getAttribute('id') === String(id));
+  let shape = properties;
+  while (shape && (shape.namespaceURI !== P || !DRAWABLE_TAGS.has(shape.localName))) shape = shape.parentNode;
+  return shape || null;
+}
+
+function copyRunProperties(document, source, fontSize) {
+  const properties = document.createElementNS(A, 'a:rPr');
+  if (source) {
+    for (const attribute of Array.from(source.attributes)) properties.setAttribute(attribute.name, attribute.value);
+    for (const child of Array.from(source.childNodes)) properties.appendChild(child.cloneNode(true));
+  }
+  properties.setAttribute('lang', properties.getAttribute('lang') || 'zh-CN');
+  properties.setAttribute('dirty', '0');
+  if (Number.isFinite(fontSize)) properties.setAttribute('sz', String(Math.max(100, Math.round(fontSize * 100))));
+  return properties;
+}
+
+function replaceShapeText(document, shape, value, fontSize) {
+  const body = directChild(shape, P, 'txBody');
+  if (!body) return false;
+  const paragraphs = Array.from(body.childNodes).filter(node => node.nodeType === 1 && node.namespaceURI === A && node.localName === 'p');
+  const model = paragraphs.find(paragraph => firstDescendant(paragraph, A, 'r')) || paragraphs[0] || null;
+  const paragraphProperties = directChild(model, A, 'pPr');
+  const runProperties = firstDescendant(model, A, 'rPr') || directChild(model, A, 'endParaRPr');
+  paragraphs.forEach(paragraph => body.removeChild(paragraph));
+  const lines = String(value ?? '').split('\n');
+  for (const line of lines) {
+    const paragraph = document.createElementNS(A, 'a:p');
+    if (paragraphProperties) paragraph.appendChild(paragraphProperties.cloneNode(true));
+    if (line) {
+      const run = document.createElementNS(A, 'a:r');
+      run.appendChild(copyRunProperties(document, runProperties, fontSize));
+      const textNode = document.createElementNS(A, 'a:t');
+      textNode.textContent = line;
+      run.appendChild(textNode);
+      paragraph.appendChild(run);
+    } else if (runProperties) {
+      paragraph.appendChild(copyRunProperties(document, runProperties, fontSize));
+      const endProperties = paragraph.lastChild;
+      if (endProperties?.localName === 'rPr') {
+        const end = document.createElementNS(A, 'a:endParaRPr');
+        for (const attribute of Array.from(endProperties.attributes)) end.setAttribute(attribute.name, attribute.value);
+        for (const child of Array.from(endProperties.childNodes)) end.appendChild(child.cloneNode(true));
+        paragraph.replaceChild(end, endProperties);
+      }
+    }
+    body.appendChild(paragraph);
+  }
+  return true;
+}
+
+function importedXmlNode(document, xml) {
+  const fragment = parseXml(`<root xmlns:a="${A}" xmlns:p="${P}" xmlns:r="${R}">${xml}</root>`, '模板插入元素');
+  const node = fragment.documentElement.firstChild;
+  if (!node) throw pptxError('模板插入元素为空');
+  return document.importNode(node, true);
+}
+
+function shapeTransform(shape) {
+  return directChild(directChild(shape, P, 'spPr'), A, 'xfrm') || directChild(shape, P, 'xfrm');
+}
+
+function replaceShape(document, shape, xml) {
+  if (!shape?.parentNode) throw pptxError('模板内容槽位已从页面中移除');
+  const replacement = importedXmlNode(document, xml);
+  const sourceTransform = shapeTransform(shape);
+  const targetTransform = shapeTransform(replacement);
+  if (sourceTransform && targetTransform) {
+    for (const attribute of Array.from(sourceTransform.attributes)) targetTransform.setAttribute(attribute.name, attribute.value);
+    for (const name of ['off', 'ext']) {
+      const source = directChild(sourceTransform, A, name);
+      const target = directChild(targetTransform, A, name);
+      if (source && target) {
+        for (const attribute of Array.from(source.attributes)) target.setAttribute(attribute.name, attribute.value);
+      }
+    }
+  }
+  shape.parentNode.replaceChild(replacement, shape);
+}
+
+function tableFrameXml(assignment) {
+  const slot = assignment.slot;
+  const rows = Array.isArray(assignment.rows) ? assignment.rows : [];
+  const columnCount = Math.max(1, ...rows.map(row => Array.isArray(row) ? row.length : 0));
+  const rowCount = Math.max(1, rows.length);
+  const width = Math.max(1, Math.round(slot.width * 9525));
+  const height = Math.max(1, Math.round(slot.height * 9525));
+  const columnWidth = Math.max(1, Math.floor(width / columnCount));
+  const rowHeight = Math.max(1, Math.floor(height / rowCount));
+  const fontSize = Math.max(800, Math.min(1400, Math.round(slot.height / rowCount * 45)));
+  const grid = Array.from({ length: columnCount }, () => `<a:gridCol w="${columnWidth}"/>`).join('');
+  const body = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const row = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : [];
+    const cells = Array.from({ length: columnCount }, (_, columnIndex) => {
+      const value = row[columnIndex] ?? '';
+      return `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="${fontSize}"${rowIndex === 0 ? ' b="1"' : ''} dirty="0"/><a:t>${xmlText(value)}</a:t></a:r></a:p></a:txBody><a:tcPr marL="45720" marR="45720" marT="22860" marB="22860" anchor="ctr"/></a:tc>`;
+    }).join('');
+    return `<a:tr h="${rowHeight}">${cells}</a:tr>`;
+  }).join('');
+  return `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="${xmlText(slot.id)}" name="SmartPPT Table ${xmlText(slot.id)}"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="${Math.round(slot.left * 9525)}" y="${Math.round(slot.top * 9525)}"/><a:ext cx="${width}" cy="${height}"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}</a:tableStyleId></a:tblPr><a:tblGrid>${grid}</a:tblGrid>${body}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+}
+
+function removeTemplateMotion(document) {
+  const root = document.documentElement;
+  for (const child of Array.from(root.childNodes)) {
+    if (child.nodeType !== 1) continue;
+    const motion = (child.namespaceURI === P && ['transition', 'timing'].includes(child.localName))
+      || (child.namespaceURI === MC && child.localName === 'AlternateContent'
+        && (firstDescendant(child, P, 'transition') || firstDescendant(child, P, 'timing')));
+    if (motion) root.removeChild(child);
+  }
+}
+
+function insertSlideMotion(document, pageJob) {
+  removeTemplateMotion(document);
+  const root = document.documentElement;
+  const extensionList = directChild(root, P, 'extLst');
+  if (pageJob.number > 1) {
+    const transition = parseXml(transitionXml(), '模板切换').documentElement;
+    root.insertBefore(document.importNode(transition, true), extensionList);
+  }
+  const entries = (pageJob.plan.template.fadeShapeIds || []).map((shapeId, order) => [String(shapeId), 100 + order * 55, 320]);
+  if (entries.length) {
+    const timing = parseXml(timingXml(entries), '模板入场动画').documentElement;
+    root.insertBefore(document.importNode(timing, true), extensionList);
+  }
+  return entries.length;
+}
+
+function templateFadeEntries(pageJob) {
+  return (pageJob.plan?.template?.fadeShapeIds || []).map((shapeId, order) => [String(shapeId), 100 + order * 55, 320]);
+}
+
+/** Clone selected template slides and fill their real content slots. */
+export async function renderTemplatePackage(job, templateBytes) {
+  const pages = validateJob(job);
+  const archive = await readZip(templateBytes);
+  if (!archive.has('ppt/presentation.xml') || !archive.has('ppt/_rels/presentation.xml.rels')) {
+    throw pptxError('模板缺少 presentation.xml 或其关系文件');
+  }
+  const presentation = parseXml(await archive.text('ppt/presentation.xml'), '模板 presentation.xml');
+  const presentationRels = parseXml(await archive.text('ppt/_rels/presentation.xml.rels'), '模板 presentation.xml.rels');
+  const slideType = `${R}/slide`;
+  for (const relation of Array.from(presentationRels.documentElement.childNodes)) {
+    if (relation.nodeType === 1 && relation.getAttribute('Type') === slideType) {
+      presentationRels.documentElement.removeChild(relation);
+    }
+  }
+  let slideList = directChild(presentation.documentElement, P, 'sldIdLst');
+  if (!slideList) {
+    slideList = presentation.createElementNS(P, 'p:sldIdLst');
+    presentation.documentElement.insertBefore(slideList, directChild(presentation.documentElement, P, 'sldSz'));
+  }
+  while (slideList.firstChild) slideList.removeChild(slideList.firstChild);
+
+  const entries = [];
+  for (const name of archive.names()) {
+    if (/^ppt\/slides\/slide\d+\.xml$/.test(name) || /^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/.test(name)) continue;
+    if (['ppt/presentation.xml', 'ppt/_rels/presentation.xml.rels', '[Content_Types].xml'].includes(name)) continue;
+    entries.push({ name, data: await archive.bytes(name) });
+  }
+
+  let fadeCount = 0;
+  for (const pageJob of pages) {
+    const template = pageJob.plan?.template;
+    if (!template?.slidePart || !archive.has(template.slidePart)) throw pptxError(`第 ${pageJob.number} 页缺少所选模板页`);
+    const document = parseXml(await archive.text(template.slidePart), `模板第 ${pageJob.number} 页来源`);
+    const relationshipsName = partRelationshipsName(template.slidePart);
+    const relationships = archive.has(relationshipsName)
+      ? parseXml(await archive.text(relationshipsName), `${template.slidePart} 关系`)
+      : parseXml(`<Relationships xmlns="${RELATIONSHIPS}"/>`, '新建模板页关系');
+    for (const relation of Array.from(relationships.documentElement.childNodes)) {
+      if (relation.nodeType === 1 && /\/(?:notesSlide|comments)$/.test(relation.getAttribute('Type') || '')) {
+        relationships.documentElement.removeChild(relation);
+      }
+    }
+
+    const titleShape = shapeById(document, template.title.slot.id);
+    if (!titleShape || !replaceShapeText(document, titleShape, template.title.text, template.title.fontSize)) {
+      throw pptxError(`第 ${pageJob.number} 页模板标题槽位 ${template.title.slot.id} 不可用`);
+    }
+    for (const assignment of template.assignments) {
+      const shape = shapeById(document, assignment.slot.id);
+      if (!shape) throw pptxError(`第 ${pageJob.number} 页模板槽位 ${assignment.slot.id} 不存在`);
+      if (assignment.kind === 'text' || assignment.kind === 'title') {
+        if (!replaceShapeText(document, shape, assignment.text, assignment.fontSize)) throw pptxError(`模板槽位 ${assignment.slot.id} 不是可编辑文字框`);
+      } else if (assignment.kind === 'image') {
+        const picture = imageBytes({ asset: assignment.asset }, pageJob.number);
+        picture.mediaName = `smartppt-slide${pageJob.number}-image${entries.filter(entry => entry.name.startsWith('ppt/media/smartppt-')).length + 1}${picture.extension}`;
+        entries.push({ name: `ppt/media/${picture.mediaName}`, data: picture.bytes });
+        const relationshipId = addRelationship(relationships, `${R}/image`, `../media/${picture.mediaName}`);
+        if (assignment.slotKind === 'picture' && shape.localName === 'pic') {
+          const blip = firstDescendant(shape, A, 'blip');
+          if (!blip) throw pptxError(`模板图片槽位 ${assignment.slot.id} 缺少 a:blip`);
+          blip.setAttributeNS(R, 'r:embed', relationshipId);
+          for (const crop of elementsNs(shape, A, 'srcRect')) crop.parentNode.removeChild(crop);
+        } else {
+          const element = {
+            x: assignment.slot.left, y: assignment.slot.top, w: assignment.slot.width, h: assignment.slot.height,
+            alt: assignment.text,
+          };
+          replaceShape(document, shape, pictureXml(element, assignment.slot.id, `SmartPPT Image ${assignment.slot.id}`, relationshipId));
+        }
+      } else if (assignment.kind === 'table') {
+        replaceShape(document, shape, tableFrameXml(assignment));
+      }
+    }
+    for (const id of template.clearShapeIds || []) {
+      const shape = shapeById(document, id);
+      if (shape && !replaceShapeText(document, shape, '', null) && shape.localName === 'graphicFrame') {
+        shape.parentNode.removeChild(shape);
+      }
+    }
+    fadeCount += insertSlideMotion(document, pageJob);
+
+    const slideName = `ppt/slides/slide${pageJob.number}.xml`;
+    const relationshipId = addRelationship(presentationRels, slideType, `slides/slide${pageJob.number}.xml`);
+    const identifier = presentation.createElementNS(P, 'p:sldId');
+    identifier.setAttribute('id', String(255 + pageJob.number));
+    identifier.setAttributeNS(R, 'r:id', relationshipId);
+    slideList.appendChild(identifier);
+    entries.push({ name: slideName, data: serializeXml(document) });
+    entries.push({ name: `ppt/slides/_rels/slide${pageJob.number}.xml.rels`, data: serializeXml(relationships) });
+  }
+
+  entries.push({ name: 'ppt/presentation.xml', data: serializeXml(presentation) });
+  entries.push({ name: 'ppt/_rels/presentation.xml.rels', data: serializeXml(presentationRels) });
+  entries.push({ name: '[Content_Types].xml', data: updateContentTypes(await archive.text('[Content_Types].xml'), pages) });
+  return { bytes: writeZip(entries), fadeCount };
+}
+
 /** Render job.pages into the supplied base.pptx shell. */
 export async function renderPackage(job, shellBytes) {
   const pages = validateJob(job);
@@ -323,15 +584,24 @@ function slideNumber(name) {
 function verifySlide(document, pageJob) {
   const number = pageJob.number;
   const drawables = drawableElements(document, number);
-  if (drawables.length !== pageJob.page.elements.length) {
-    throw pptxError(`第 ${number} 页 drawable 数为 ${drawables.length}，预期 ${pageJob.page.elements.length}`);
+  const template = pageJob.plan?.template;
+  const drawableProperties = [];
+  if (!template) {
+    if (drawables.length !== pageJob.page.elements.length) {
+      throw pptxError(`第 ${number} 页 drawable 数为 ${drawables.length}，预期 ${pageJob.page.elements.length}`);
+    }
+    drawables.forEach((element, index) => {
+      const properties = firstDescendant(element, P, 'cNvPr');
+      if (!properties) throw pptxError(`第 ${number} 页第 ${index + 1} 个 drawable 缺少 p:cNvPr`);
+      if (properties.getAttribute('id') !== String(index + 2)) throw pptxError(`第 ${number} 页 shape id 与元素顺序不一致`);
+      drawableProperties.push(properties);
+    });
+  } else {
+    const expectedIds = [template.title.slot.id, ...template.assignments.map(assignment => assignment.slot.id)];
+    for (const id of expectedIds) {
+      if (!shapeById(document, id)) throw pptxError(`第 ${number} 页缺少模板内容形状 ${id}`);
+    }
   }
-  const drawableProperties = drawables.map((element, index) => {
-    const properties = firstDescendant(element, P, 'cNvPr');
-    if (!properties) throw pptxError(`第 ${number} 页第 ${index + 1} 个 drawable 缺少 p:cNvPr`);
-    if (properties.getAttribute('id') !== String(index + 2)) throw pptxError(`第 ${number} 页 shape id 与元素顺序不一致`);
-    return properties;
-  });
   const shapeIds = new Set(elementsNs(document, P, 'cNvPr').map(node => node.getAttribute('id')));
   for (const target of elementsNs(document, P, 'spTgt')) {
     const spid = target.getAttribute('spid');
@@ -356,7 +626,7 @@ function verifySlide(document, pageJob) {
     const target = firstDescendant(effect, P, 'spTgt');
     return target ? target.getAttribute('spid') : '';
   });
-  const expectedAnimationIds = fadeEntries(pageJob).map(entry => entry[0]);
+  const expectedAnimationIds = (template ? templateFadeEntries(pageJob) : fadeEntries(pageJob)).map(entry => entry[0]);
   if (actualAnimationIds.length !== expectedAnimationIds.length || actualAnimationIds.some((id, index) => id !== expectedAnimationIds[index])) {
     throw pptxError(`第 ${number} 页错峰 Fade 动画 spid 与 job.fade 不一致`);
   }
@@ -370,6 +640,11 @@ export async function verifyPackage(pptxBytes, job) {
   for (const name of names) await archive.bytes(name);
   const slideNames = names.filter(name => slideNumber(name) >= 0);
   if (slideNames.length !== pages.length) throw pptxError(`PPTX 页数为 ${slideNames.length}，预期 ${pages.length}`);
+  const presentation = parseXml(await archive.text('ppt/presentation.xml'), 'presentation.xml');
+  const slideLists = elementsNs(presentation, P, 'sldIdLst');
+  if (slideLists.length !== 1) throw pptxError(`presentation.xml 的 sldIdLst 数量为 ${slideLists.length}，预期 1`);
+  const identifiers = elementsNs(slideLists[0], P, 'sldId');
+  if (identifiers.length !== pages.length) throw pptxError(`presentation.xml 的页面引用数为 ${identifiers.length}，预期 ${pages.length}`);
   for (const pageJob of pages) {
     const name = `ppt/slides/slide${pageJob.number}.xml`;
     if (!archive.has(name)) throw pptxError(`PPTX 缺少第 ${pageJob.number} 页：${name}`);

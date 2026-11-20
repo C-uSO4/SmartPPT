@@ -84,7 +84,7 @@ function clearTemplate() {
   if (busy) return;
   selectedTemplate = null;
   $('templateInput').value = '';
-  $('templateNames').textContent = '套用主题色、字体、纯色或全页 PNG/JPEG 背景';
+  $('templateNames').textContent = '从模板中挑选真实版面并填入内容';
   $('removeTemplate').classList.add('hidden');
 }
 
@@ -323,9 +323,8 @@ function renderResult(result, pptxBytes) {
   const templateSummary = $('templateSummary');
   templateSummary.classList.toggle('hidden', !result.template);
   if (result.template) {
-    const backgroundNames = { image: '图片背景', color: '纯色背景' };
-    const fonts = [result.template.titleFont, result.template.bodyFont].filter(Boolean).join(' / ') || '回退字体';
-    templateSummary.textContent = `模板：${fonts}；封面 ${backgroundNames[result.template.coverBackground]}，正文 ${backgroundNames[result.template.contentBackground]}。${result.template.limitations}${result.template.warnings.length ? ` ${result.template.warnings.join(' ')}` : ''}`;
+    const fonts = [result.template.titleFont, result.template.bodyFont].filter(Boolean).join(' / ') || '模板原字体';
+    templateSummary.textContent = `已使用 ${result.template.usedLayoutCount} / ${result.template.layoutCount} 个真实模板版面；字体 ${fonts}。${result.template.limitations}${result.template.warnings.length ? ` ${result.template.warnings.join(' ')}` : ''}`;
   } else {
     templateSummary.textContent = '';
   }

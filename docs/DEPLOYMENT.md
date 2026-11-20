@@ -85,4 +85,4 @@ python -m unittest discover -s tests -p "test_*.py"
 node --test tests/web.test.cjs tests/online-static.test.cjs tests/imported-pptx.test.cjs tests/ai-proxy.test.cjs
 ```
 
-本轮 16 项 JavaScript 测试全部通过，其中 AI 代理测试使用模拟上游，不读取 Secret、不发起真实模型计费请求。发布后还应检查生产首页与 `GET /api/analyze`，在公开地址实际生成并下载 PPTX，再用 Python `zipfile` 独立回读，并在目标 WPS 版本中打开、导出和播放检查。配置 Secret 后，需重新部署并实际勾选 AI 完成一次生成，核对模型角色调整、100% 原文对账与 AI 实测耗时。静态构建、模拟测试或健康检查成功不等于真实 DeepSeek 请求、公开访问或 WPS 动画已经验收。
+本轮 19 项 JavaScript 测试全部通过，静态站点已重新构建。其中 AI 代理测试使用模拟上游，不读取 Secret、不发起真实模型计费请求。真实模板链路另在浏览器中完成页面克隆、原生图片与表格、原文对账及 OOXML 回读，并在本机 WPS 成功打开和导出 3 页纯文字稿与 2 页媒体稿；这些结果只代表当前测试文件，不等于所有模板或连续动画均已验收。发布后还应检查生产首页与 `GET /api/analyze`，在公开地址实际生成并下载 PPTX，再用 Python `zipfile` 独立回读，并在目标 WPS 版本中打开、导出和播放检查。配置 Secret 后，需重新部署并实际勾选 AI 完成一次生成，核对模型角色调整、100% 原文对账与 AI 实测耗时。静态构建、模拟测试或健康检查成功不等于真实 DeepSeek 请求、公开访问或 WPS 动画已经验收。

@@ -26,12 +26,18 @@ export async function analyzeBlockRoles(blocks) {
   return { roles, model: typeof data.model === 'string' ? data.model : null };
 }
 
+function headingEligible(block) {
+  const text = String(block.text || '').trim();
+  return text.length <= 60 && !text.includes('\n') && !/[。！？；!?;]/.test(text) && !/^[•●▪-]\s+/.test(text);
+}
+
 export function applyBlockRoles(blocks, roles) {
   const byId = new Map(blocks.map(block => [block.id, block]));
   let changed = 0;
   for (const role of roles) {
     const block = byId.get(role.id);
     if (!block || !['heading', 'paragraph'].includes(block.kind)) continue;
+    if (block.kind === 'paragraph' && role.kind === 'heading' && !headingEligible(block)) continue;
     if (block.kind !== role.kind || block.level !== role.level) changed += 1;
     block.kind = role.kind;
     block.level = role.kind === 'heading' ? role.level : 0;

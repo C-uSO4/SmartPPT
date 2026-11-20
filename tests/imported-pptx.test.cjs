@@ -70,6 +70,32 @@ function importedModel(makeModel) {
   return { model: makeModel('fixture.pptx', blocks), longValue, asset };
 }
 
+test('Markdown 清理行内格式且保留正文角色与真实标点', async () => {
+  const { parser } = await loadModules();
+  const source = '# **研究标题**\n\n**\n\n这是一段**完整**正文，包含 2 * 3 和 variable_name；[参考链接](https://example.com) 与 `code_span`。\n\n- ~~过期标记~~ **仍保留**文字\n';
+  const { blocks } = await parser.parseDocument('inline.md', new TextEncoder().encode(source));
+  assert.deepEqual(blocks.map(item => item.kind), ['heading', 'paragraph', 'bullet']);
+  assert.equal(blocks[0].text, '研究标题');
+  assert.equal(blocks[1].text, '这是一段完整正文，包含 2 * 3 和 variable_name；参考链接 与 code_span。');
+  assert.equal(blocks[2].text, '过期标记 仍保留文字');
+  assert.ok(blocks.every(item => !/(?:\*\*|__|~~|`)/.test(item.text)));
+  assert.equal(parser.markdownInlineText('**'), '');
+});
+
+test('完整句子不会被文本规则或 PPTX 页面分组提升为标题', async () => {
+  const { parser } = await loadModules();
+  const { blocks } = await parser.parseDocument('sentences.txt', new TextEncoder().encode('一、这是完整解释。\n1、另一条完整说明。\n'));
+  assert.ok(blocks.every(item => item.kind !== 'heading'));
+  const source = [
+    sourceBlock('p1', 'paragraph', '没有标题占位的封面正文。', 1),
+    sourceBlock('p2', 'paragraph', '第二页普通正文不应变成小标题。', 2),
+  ];
+  const model = parser.makeModel('plain.pptx', source);
+  assert.equal(model.title, 'plain');
+  assert.equal(model.sections[0].title, '第 2 页');
+  assert.equal(model.sections[0].items[0].kind, 'paragraph');
+});
+
 test('PPTX 主章节、完整小标题与原始正文段落保持边界', async () => {
   const { parser, layout } = await loadModules();
   const { model } = importedModel(parser.makeModel);
@@ -103,9 +129,9 @@ test('PPTX 正文使用 1.3 倍行距、可读字号并只按已有符号分段'
     '• 第一条原有要点保持原样。 • 第二条只按已有符号分段。');
   assert.ok(body.paragraphs[0].runs[0].sizePt >= 18.5,
     `正文字号 ${body.paragraphs[0].runs[0].sizePt} 应明显大于旧版缩放字号`);
-  assert.equal(label.paragraphs[0].runs[0].sizePt, 16);
-  assert.equal(label.x, body.x);
-  assert.ok(label.y + label.h <= body.y);
+  assert.equal(label.paragraphs[0].runs[0].sizePt, 28,
+    '普通正文不能因为字号大、文字短就被压缩成小标题');
+  assert.ok(label.y + label.h <= 650);
   assert.ok(body.y + body.h <= 650);
 });
 
@@ -183,7 +209,7 @@ test('PPTX 大幅背景图位于正文底层且不挤压文字', async () => {
   assert.equal(body.paragraphs[1].runs[0].text, '时间：2026.10');
 });
 
-test('模板主题、字体和背景直接写入页面且不参与动画索引', async () => {
+test('模板内容分配到真实页面槽位且保留背景预览', async () => {
   const { parser, layout } = await loadModules();
   const blocks = [
     { id: 'b0001', kind: 'heading', text: '模板测试', level: 1, source: { line: 1 }, numbers: [] },
@@ -203,9 +229,27 @@ test('模板主题、字体和背景直接写入页面且不参与动画索引',
       background: '#F4F1E8', image: null, imageLuminance: null,
       colors: { lt1: '#FFFFFF', dk1: '#102A43', accent1: '#FF6600', accent2: '#00A389' },
     },
+    candidates: [
+      {
+        slidePart: 'ppt/slides/slide1.xml', slideNumber: 1,
+        title: { id: '2', kind: 'title', left: 100, top: 100, width: 900, height: 100, fontSize: 36, text: '封面示例' },
+        bodySlots: [{ id: '3', kind: 'body', left: 100, top: 260, width: 800, height: 180, fontSize: 20, text: '封面正文示例' }],
+        pictureSlots: [], tableSlots: [], contentTextIds: ['3'],
+      },
+      {
+        slidePart: 'ppt/slides/slide2.xml', slideNumber: 2,
+        title: { id: '7', kind: 'title', left: 70, top: 50, width: 1000, height: 80, fontSize: 30, text: '内容标题示例' },
+        bodySlots: [{ id: '9', kind: 'body', left: 80, top: 180, width: 900, height: 300, fontSize: 22, text: '内容正文示例' }],
+        pictureSlots: [], tableSlots: [], contentTextIds: ['9'],
+      },
+    ],
   };
   const pages = layout.planPages(model, 'paper', visualTemplate);
   assert.equal(pages.length, 2);
+  assert.equal(pages[0].plan.template.slidePart, 'ppt/slides/slide1.xml');
+  assert.equal(pages[1].plan.template.slidePart, 'ppt/slides/slide2.xml');
+  assert.equal(pages[1].plan.template.assignments[0].slot.id, '9');
+  assert.deepEqual(pages[1].plan.template.fadeShapeIds, ['7', '9']);
   assert.equal(pages[0].page.elements[0].fill, '#101820');
   assert.equal(pages[0].page.elements[1].type, 'image');
   assert.equal(pages[0].page.elements[1].fit, 'fill');

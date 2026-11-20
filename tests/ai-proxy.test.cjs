@@ -107,6 +107,23 @@ test('模型返回未知 ID 时拒绝应用', async () => {
   assert.match((await response.json()).error, /结构校验/);
 });
 
+test('浏览器端拒绝 AI 把完整正文提升为标题', async () => {
+  const { applyBlockRoles } = await import(pathToFileURL(path.join(root, 'src', 'web', 'engine', 'ai.js')).href);
+  const blocks = [
+    { id: 'body', kind: 'paragraph', level: 0, text: '这是一段完整解释，不能变成小标题。' },
+    { id: 'short', kind: 'paragraph', level: 0, text: '研究背景' },
+  ];
+  const changed = applyBlockRoles(blocks, [
+    { id: 'body', kind: 'heading', level: 3 },
+    { id: 'short', kind: 'heading', level: 2 },
+  ]);
+  assert.equal(changed, 1);
+  assert.equal(blocks[0].kind, 'paragraph');
+  assert.equal(blocks[0].level, 0);
+  assert.equal(blocks[1].kind, 'heading');
+  assert.equal(blocks[1].level, 2);
+});
+
 test('浏览器端只应用角色，不改变任何原文', async () => {
   const { applyBlockRoles } = await import(pathToFileURL(path.join(root, 'src', 'web', 'engine', 'ai.js')).href);
   const blocks = sample.blocks.map(block => ({ ...block }));

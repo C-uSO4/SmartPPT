@@ -18,6 +18,94 @@ function block(kind, text, source, level = 0) {
   return { kind, text: clean(text), level, source };
 }
 
+function markdownLinkEnd(value, start) {
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === ')') return index;
+  }
+  return -1;
+}
+
+export function markdownInlineText(value) {
+  const source = String(value ?? '');
+  let output = '';
+  let index = 0;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === '\\' && index + 1 < source.length && /[!-\/:-@\[-`{-~]/.test(source[index + 1])) {
+      output += source[index + 1];
+      index += 2;
+      continue;
+    }
+    if (character === '`') {
+      let count = 1;
+      while (source[index + count] === '`') count += 1;
+      const fence = '`'.repeat(count);
+      const end = source.indexOf(fence, index + count);
+      if (end >= 0) {
+        let code = source.slice(index + count, end).replace(/\s+/g, ' ');
+        if (code.startsWith(' ') && code.endsWith(' ') && code.trim()) code = code.slice(1, -1);
+        output += code;
+        index = end + count;
+        continue;
+      }
+    }
+    if (character === '[' || (character === '!' && source[index + 1] === '[')) {
+      const labelStart = index + (character === '!' ? 2 : 1);
+      const labelEnd = source.indexOf(']', labelStart);
+      if (labelEnd >= 0 && source[labelEnd + 1] === '(') {
+        const destinationEnd = markdownLinkEnd(source, labelEnd + 2);
+        if (destinationEnd >= 0) {
+          output += markdownInlineText(source.slice(labelStart, labelEnd));
+          index = destinationEnd + 1;
+          continue;
+        }
+      }
+    }
+    if (character === '<') {
+      const end = source.indexOf('>', index + 1);
+      if (end > index) {
+        const inside = source.slice(index + 1, end);
+        if (/^(?:https?:\/\/|mailto:)\S+$/i.test(inside)) {
+          output += inside.replace(/^mailto:/i, '');
+          index = end + 1;
+          continue;
+        }
+        if (/^\/?(?:strong|em|b|i|u|s|del|span|code|br)(?:\s[^>]*)?$/i.test(inside)) {
+          if (/^br\b/i.test(inside)) output += ' ';
+          index = end + 1;
+          continue;
+        }
+      }
+    }
+    if (['*', '_', '~'].includes(character)) {
+      let count = 1;
+      while (source[index + count] === character) count += 1;
+      const previous = index ? source[index - 1] : '';
+      const next = source[index + count] || '';
+      const intrawordUnderscore = character === '_' && /[\p{L}\p{N}]/u.test(previous) && /[\p{L}\p{N}]/u.test(next);
+      const multiplication = character === '*' && count === 1 && /\d/.test(previous) && /\d/.test(next);
+      const spacedAsterisk = character === '*' && count === 1 && (!previous || /\s/.test(previous)) && (!next || /\s/.test(next));
+      const singleTilde = character === '~' && count < 2;
+      if (intrawordUnderscore || multiplication || spacedAsterisk || singleTilde) output += character.repeat(count);
+      index += count;
+      continue;
+    }
+    output += character;
+    index += 1;
+  }
+  return clean(output);
+}
+
 function explicitNote(text) {
   const match = String(text).match(/^(?:备注|讲稿|演讲备注|注释|notes?)\s*[:：]\s*(.+)$/i);
   return match ? match[1] : null;
@@ -281,7 +369,8 @@ function parseMarkdown(filename, bytes, assets) {
 
   function flushParagraph() {
     if (paragraphParts.length) {
-      blocks.push(block('paragraph', joinWrapped(paragraphParts), { line: paragraphStart }));
+      const value = markdownInlineText(joinWrapped(paragraphParts));
+      if (value) blocks.push(block('paragraph', value, { line: paragraphStart }));
       paragraphParts = [];
     }
   }
@@ -343,14 +432,16 @@ function parseMarkdown(filename, bytes, assets) {
     const note = explicitNote(text);
     if (note !== null) {
       flushParagraph();
-      blocks.push(block('note', note, source));
+      const value = markdownInlineText(note);
+      if (value) blocks.push(block('note', value, source));
       index += 1;
       continue;
     }
     const nextText = index + 1 < lines.length ? lines[index + 1].trim() : '';
     if (/^(?:=+|-+)$/.test(nextText) && !/^(?:#{1,6}|[-*+]|\d+[.)、])/.test(text)) {
       flushParagraph();
-      blocks.push(block('heading', text, source, nextText.startsWith('=') ? 1 : 2));
+      const value = markdownInlineText(text);
+      if (value) blocks.push(block('heading', value, source, nextText.startsWith('=') ? 1 : 2));
       index += 2;
       continue;
     }
@@ -378,7 +469,7 @@ function parseMarkdown(filename, bytes, assets) {
       flushParagraph();
       const reference = image[2].trim();
       const fallback = reference.startsWith('data:image/') ? '图片' : pathStem(reference);
-      const item = block('image', image[1] || fallback || '图片', source);
+      const item = block('image', markdownInlineText(image[1]) || fallback || '图片', source);
       item.asset = resolveImage(filename, reference, number, assets);
       blocks.push(item);
       index += 1;
@@ -388,11 +479,13 @@ function parseMarkdown(filename, bytes, assets) {
     const listItem = raw.match(/^(\s*)(?:[-*+]|\d{1,9}[.)、])(?:\s+|(?=[\u4e00-\u9fff]))(.+)$/u);
     if (heading) {
       flushParagraph();
-      blocks.push(block('heading', heading[2], source, heading[1].length));
+      const value = markdownInlineText(heading[2].replace(/\s+#+\s*$/, ''));
+      if (value) blocks.push(block('heading', value, source, heading[1].length));
     } else if (listItem) {
       flushParagraph();
       const indent = codePointLength(expandTabs(listItem[1]));
-      blocks.push(block('bullet', listItem[2], source, Math.min(6, 1 + Math.floor(indent / 2))));
+      const value = markdownInlineText(listItem[2].replace(/^\[[ xX]\]\s+/, ''));
+      if (value) blocks.push(block('bullet', value, source, Math.min(6, 1 + Math.floor(indent / 2))));
     } else {
       if (!paragraphParts.length) paragraphStart = number;
       paragraphParts.push(text);
@@ -405,11 +498,13 @@ function parseMarkdown(filename, bytes, assets) {
 }
 
 function textHeadingLevel(text, numericSections = false) {
-  if (/^第.{1,8}(?:章|篇|部分)(?:\s+.+)?$/u.test(text)) return 2;
-  if (/^第.{1,8}节(?:\s+.+)?$/u.test(text)) return 3;
-  if (/^(?:[一二三四五六七八九十]+、|\d{1,2}、)\S+/u.test(text)) return 2;
-  if (/^[（(][一二三四五六七八九十]+[）)]\s*\S+/u.test(text)) return 3;
-  if (numericSections && /^\d{1,2}[.]\s*\S+/u.test(text)) return 2;
+  const value = clean(text);
+  if (!value || codePointLength(value) > 80 || /[。！？；!?;]$/.test(value)) return null;
+  if (/^第.{1,8}(?:章|篇|部分)(?:\s+.+)?$/u.test(value)) return 2;
+  if (/^第.{1,8}节(?:\s+.+)?$/u.test(value)) return 3;
+  if (/^[一二三四五六七八九十]+、\S+/u.test(value)) return 2;
+  if (/^[（(][一二三四五六七八九十]+[）)]\s*\S+/u.test(value)) return 3;
+  if (numericSections && /^\d{1,2}[.、]\s*\S+/u.test(value)) return 2;
   return null;
 }
 
@@ -472,7 +567,7 @@ function parseText(bytes) {
       blocks.push(block('heading', text, source, 1));
       return;
     }
-    const listItem = raw.match(/^(\s*)(?:[-*•]|\d{1,9}[.)]|[（(]\d+[）)])(?:\s+|(?=[\u4e00-\u9fff]))(.+)$/u);
+    const listItem = raw.match(/^(\s*)(?:[-*•]|\d{1,9}[.)、]|[（(]\d+[）)])(?:\s+|(?=[\u4e00-\u9fff]))(.+)$/u);
     if (listItem) {
       flushParagraph();
       const indent = codePointLength(expandTabs(listItem[1]));
@@ -682,6 +777,13 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function inferredTitleEligible(shape, cover) {
+  const value = clean(shapeText(shape).join(' '));
+  if (!value || codePointLength(value) > 80 || /[。！？；!?;]/.test(value)) return false;
+  if (smallPageNumber(value) || /^[-+]?\d+(?:\.\d+)?%?$/.test(value)) return false;
+  return cover || !/\n/.test(shapeText(shape).join('\n').trim());
+}
+
 async function parsePptx(bytes) {
   const blocks = [];
   const notes = [];
@@ -700,31 +802,18 @@ async function parsePptx(bytes) {
     const shapes = elements.filter(shape => matches(shape, P, 'sp') && shapeText(shape).length);
     let titleShape = shapes.find(shape => ['title', 'ctrTitle'].includes(placeholderType(shape))) || null;
     if (!titleShape && shapes.length) {
-      const ordinary = shapes.filter(shape => matches(shape, P, 'sp'));
-      const pool = ordinary.length ? ordinary : shapes;
-      const titleZone = index === 1 ? 400 : 220;
-      let candidates = [];
-      for (const shape of pool) {
-        const value = shapeText(shape).join(' ');
-        if (shapeTop(shape, parents) <= titleZone && codePointLength(value) <= 160
-          && !/^[-+]?\d+(?:\.\d+)?%?$/.test(value) && !smallPageNumber(value) && shapeFontSize(shape) >= 16) {
-          candidates.push(shape);
-        }
-      }
-      if (!candidates.length) {
-        candidates = pool.filter(shape => shapeTop(shape, parents) <= titleZone && !smallPageNumber(shapeText(shape).join(' ')));
-      }
+      const pool = shapes.filter(shape => matches(shape, P, 'sp'));
+      const titleZone = index === 1 ? 360 : 180;
+      const candidates = pool.filter(shape => {
+        if (shapeTop(shape, parents) > titleZone || !inferredTitleEligible(shape, index === 1)) return false;
+        const size = shapeFontSize(shape);
+        const largestPeer = Math.max(0, ...pool.filter(peer => peer !== shape).map(peer => shapeFontSize(peer)));
+        return size >= (index === 1 ? 22 : 18) && (index === 1 || size >= largestPeer + 2);
+      });
       if (candidates.length) {
         const topmost = Math.min(...candidates.map(shape => shapeTop(shape, parents)));
-        const nearest = candidates.filter(shape => shapeTop(shape, parents) <= topmost + 90);
+        const nearest = candidates.filter(shape => shapeTop(shape, parents) <= topmost + 60);
         titleShape = nearest.reduce((best, shape) => shapeFontSize(shape) > shapeFontSize(best) ? shape : best, nearest[0]);
-      } else {
-        titleShape = pool.reduce((best, shape) => {
-          const topDifference = shapeTop(shape, parents) - shapeTop(best, parents);
-          if (topDifference < 0) return shape;
-          if (topDifference === 0 && shapeLeft(shape, parents) < shapeLeft(best, parents)) return shape;
-          return best;
-        }, pool[0]);
       }
     }
     const titleSize = titleShape ? shapeFontSize(titleShape) : 0;
@@ -737,7 +826,8 @@ async function parsePptx(bytes) {
         const delta = shapeTop(shape, parents) - titleTop;
         const size = shapeFontSize(shape);
         const value = shapeText(shape).join(' ');
-        if (delta >= 24 && delta <= (index === 1 ? 300 : 90) && size >= 12 && size < titleSize && !smallPageNumber(value)) {
+        if (index === 1 && delta >= 24 && delta <= 300 && size >= 12 && size < titleSize
+          && codePointLength(value) <= 100 && !/[。！？；!?;]/.test(value) && !smallPageNumber(value)) {
           subtitleCandidates.push(shape);
         }
       }
@@ -1080,7 +1170,7 @@ export async function parseVisualTemplate(templateBytes) {
     height: integerValue(size?.getAttribute('cy'), 6858000),
   };
   if (Math.abs(pageSize.width / pageSize.height - 16 / 9) > 0.02) {
-    warn('模板不是 16:9；生成稿仍固定为 16:9，全页背景图会拉伸适配。');
+    warn('模板不是 16:9；下载稿保留模板原始页面尺寸，网页预览仅作近似展示。');
   }
 
   async function resolveReference(slidePart) {
@@ -1112,6 +1202,71 @@ export async function parseVisualTemplate(templateBytes) {
     };
   }
 
+  const candidates = [];
+  for (let slideIndex = 0; slideIndex < slides.length; slideIndex += 1) {
+    const entry = await loadPart(slides[slideIndex]);
+    const parents = new Map();
+    for (const parent of walk(entry.root)) {
+      for (const child of childElements(parent)) parents.set(child, parent);
+    }
+    const makeSlot = (shape, kind) => {
+      const properties = firstDescendant(shape, P, 'cNvPr');
+      const id = properties?.getAttribute('id') || '';
+      if (!id) return null;
+      const bounds = shapeBounds(shape, parents);
+      const fontSize = shapeFontSize(shape) || (kind === 'title' ? 32 : 18);
+      const lineCapacity = Math.max(1, Math.floor(bounds.height / Math.max(18, fontSize * 96 / 72 * 1.3)));
+      const characterCapacity = Math.max(4, Math.floor(bounds.width / Math.max(8, fontSize * 96 / 72)));
+      return {
+        id, kind, ...bounds, fontSize,
+        capacity: Math.max(8, lineCapacity * characterCapacity),
+        text: clean(shapeText(shape).join(' ')),
+      };
+    };
+    const textShapes = descendants(entry.root, P, 'sp').filter(shape => findPath(shape, [[P, 'txBody']]));
+    const titledShapes = textShapes.filter(shape => shapeText(shape).length);
+    let titleShape = textShapes.find(shape => ['title', 'ctrTitle'].includes(placeholderType(shape))) || null;
+    if (!titleShape) {
+      const titleCandidates = titledShapes.filter(shape => inferredTitleEligible(shape, slideIndex === 0)
+        && shapeTop(shape, parents) <= pageSize.height / 9525 * 0.45 && shapeFontSize(shape) >= 18);
+      if (titleCandidates.length) {
+        titleShape = titleCandidates.reduce((best, shape) => shapeFontSize(shape) > shapeFontSize(best) ? shape : best, titleCandidates[0]);
+      }
+    }
+    const bodySlots = [];
+    const contentTextIds = [];
+    for (const shape of textShapes) {
+      if (shape === titleShape) continue;
+      const slot = makeSlot(shape, 'body');
+      if (!slot || slot.width < 80 || slot.height < 24) continue;
+      const placeholder = placeholderType(shape);
+      if (!slot.text && !placeholder) continue;
+      const decorative = !placeholder && slot.text && (smallPageNumber(slot.text)
+        || (slot.fontSize <= 14 && (slot.top <= 90 || slot.top + slot.height >= pageSize.height / 9525 - 80)));
+      if (decorative) continue;
+      bodySlots.push(slot);
+      contentTextIds.push(slot.id);
+    }
+    bodySlots.sort((left, right) => left.top - right.top || left.left - right.left);
+    const pictureSlots = descendants(entry.root, P, 'pic').map(shape => makeSlot(shape, 'picture')).filter(Boolean)
+      .filter(slot => slot.width * slot.height >= 10000
+        && slot.width * slot.height < pageSize.width / 9525 * pageSize.height / 9525 * 0.8)
+      .sort((left, right) => right.width * right.height - left.width * left.height);
+    const tableSlots = descendants(entry.root, P, 'graphicFrame')
+      .filter(frame => firstDescendant(frame, A, 'tbl'))
+      .map(frame => makeSlot(frame, 'table')).filter(Boolean);
+    contentTextIds.push(...tableSlots.map(slot => slot.id));
+    candidates.push({
+      slidePart: slides[slideIndex],
+      slideNumber: slideIndex + 1,
+      title: titleShape ? makeSlot(titleShape, 'title') : null,
+      bodySlots,
+      pictureSlots,
+      tableSlots,
+      contentTextIds,
+    });
+  }
+
   const cover = await resolveReference(slides[0]);
   const content = await resolveReference(slides[1] || slides[0]);
   return {
@@ -1123,6 +1278,7 @@ export async function parseVisualTemplate(templateBytes) {
       body: cover.fonts.body || content.fonts.body,
     },
     pageSize,
+    candidates,
     warnings,
   };
 }
@@ -1194,32 +1350,62 @@ function pptxChapters(sections) {
 }
 
 export function makeModel(filename, blocks, decorations = [], notes = []) {
+  const format = extensionOf(filename);
   const headings = blocks.filter(item => item.kind === 'heading');
-  const title = headings.length ? headings[0].text : pathStem(filename);
-  const titleId = headings.length ? headings[0].id : null;
   const sections = [];
   const lead = [];
-  let current = null;
-  const titleItem = headings.length ? headings[0] : null;
-  const remainingLevels = headings.filter(item => item !== titleItem).map(item => item.level);
-  const sectionLevel = remainingLevels.length ? Math.min(...remainingLevels) : 2;
-  for (const item of blocks) {
-    if (item === titleItem) continue;
-    if (item.kind === 'heading' && item.level <= sectionLevel) {
-      current = { title: item.text, heading_id: item.id, source_slide: item.source.slide ?? null, items: [] };
-      sections.push(current);
-    } else if (!current) {
-      lead.push(item);
-    } else {
-      current.items.push(item);
+  let titleItem = null;
+  let titleId = null;
+  let title = pathStem(filename);
+
+  if (format === 'pptx') {
+    titleItem = blocks.find(item => item.kind === 'heading' && item.source.slide === 1) || null;
+    if (titleItem) {
+      title = titleItem.text;
+      titleId = titleItem.id;
+    }
+    lead.push(...blocks.filter(item => item.source.slide === 1 && item !== titleItem));
+    const slideNumbers = [...new Set(blocks.map(item => item.source.slide).filter(slide => slide > 1))]
+      .sort((left, right) => left - right);
+    for (const slide of slideNumbers) {
+      const slideBlocks = blocks.filter(item => item.source.slide === slide);
+      const heading = slideBlocks.find(item => item.kind === 'heading') || null;
+      sections.push({
+        title: heading ? heading.text : `第 ${slide} 页`,
+        heading_id: heading ? heading.id : null,
+        source_slide: slide,
+        items: slideBlocks.filter(item => item !== heading),
+      });
+    }
+  } else {
+    const firstHeading = headings[0] || null;
+    titleItem = firstHeading && (firstHeading.level === 1 || blocks[0] === firstHeading) ? firstHeading : null;
+    if (titleItem) {
+      title = titleItem.text;
+      titleId = titleItem.id;
+    }
+    let current = null;
+    const remainingLevels = headings.filter(item => item !== titleItem).map(item => item.level);
+    const sectionLevel = remainingLevels.length ? Math.min(...remainingLevels) : 2;
+    for (const item of blocks) {
+      if (item === titleItem) continue;
+      if (item.kind === 'heading' && item.level <= sectionLevel) {
+        current = { title: item.text, heading_id: item.id, source_slide: item.source.slide ?? null, items: [] };
+        sections.push(current);
+      } else if (!current) {
+        lead.push(item);
+      } else {
+        current.items.push(item);
+      }
+    }
+    if (!sections.length) {
+      sections.push({ title, heading_id: titleId, items: blocks.filter(item => item !== titleItem) });
+      lead.length = 0;
     }
   }
-  if (!sections.length) {
-    sections.push({ title, heading_id: titleId, items: blocks.filter(item => item.id !== titleId) });
-    lead.length = 0;
-  }
+
   const model = {
-    source: { filename, format: extensionOf(filename) },
+    source: { filename, format },
     title,
     title_id: titleId,
     lead,
@@ -1228,6 +1414,6 @@ export function makeModel(filename, blocks, decorations = [], notes = []) {
     decorations: decorations || [],
     notes: notes || [],
   };
-  if (model.source.format === 'pptx') model.chapters = pptxChapters(sections);
+  if (format === 'pptx') model.chapters = pptxChapters(sections);
   return model;
 }
