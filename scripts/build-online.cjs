@@ -15,7 +15,7 @@ for (const name of ['assets', 'examples']) {
   fs.cpSync(path.join(source, name), path.join(output, name), { recursive: true });
 }
 fs.mkdirSync(path.join(output, 'engine'));
-for (const name of ['engine.js', 'parser.js', 'layout.js', 'zip.js', 'pptx.js']) {
+for (const name of ['engine.js', 'parser.js', 'layout.js', 'zip.js', 'pptx.js', 'ai.js']) {
   fs.copyFileSync(path.join(source, 'engine', name), path.join(output, 'engine', name));
 }
 console.log(`在线静态站点已生成：${output}`);

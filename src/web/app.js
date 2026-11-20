@@ -6,6 +6,7 @@ const maxFileSize = 25 * 1024 * 1024;
 const stageOrder = ['parsing', 'rendering', 'auditing'];
 let selectedFile = null;
 let selectedAssets = [];
+let selectedTemplate = null;
 let busy = false;
 let currentResult = null;
 let currentPage = 0;
@@ -60,6 +61,33 @@ function clearFile() {
   $('generateButton').disabled = true;
 }
 
+function setTemplate(file) {
+  if (busy) return;
+  selectedTemplate = null;
+  $('removeTemplate').classList.add('hidden');
+  if (extensionOf(file.name) !== 'pptx') {
+    $('templateInput').value = '';
+    $('templateNames').textContent = '模板必须是 PPTX 文件';
+    return;
+  }
+  if (!file.size || file.size > maxFileSize) {
+    $('templateInput').value = '';
+    $('templateNames').textContent = '模板不能为空，且不能超过 25 MB';
+    return;
+  }
+  selectedTemplate = file;
+  $('templateNames').textContent = `${file.name} · ${formatBytes(file.size)}`;
+  $('removeTemplate').classList.remove('hidden');
+}
+
+function clearTemplate() {
+  if (busy) return;
+  selectedTemplate = null;
+  $('templateInput').value = '';
+  $('templateNames').textContent = '套用主题色、字体、纯色或全页 PNG/JPEG 背景';
+  $('removeTemplate').classList.add('hidden');
+}
+
 function showError(message) {
   showOnly('errorState');
   $('errorMessage').textContent = message;
@@ -70,6 +98,9 @@ function showError(message) {
   $('generateButton').disabled = !selectedFile;
   $('removeFile').disabled = false;
   $('assetInput').disabled = false;
+  $('templateInput').disabled = false;
+  $('removeTemplate').disabled = false;
+  $('aiAssist').disabled = false;
 }
 
 function setPipeline(stage) {
@@ -88,6 +119,9 @@ function finishGeneration() {
   $('generateButton').disabled = !selectedFile;
   $('removeFile').disabled = false;
   $('assetInput').disabled = false;
+  $('templateInput').disabled = false;
+  $('removeTemplate').disabled = false;
+  $('aiAssist').disabled = false;
 }
 
 function friendlyError(error) {
@@ -122,9 +156,12 @@ async function generate() {
   setPipeline('parsing');
   $('generateButton').disabled = true;
   $('generateButton').classList.add('busy');
-  $('generateButton').querySelector('span').textContent = '正在浏览器内生成…';
+  $('generateButton').querySelector('span').textContent = $('aiAssist').checked ? '正在进行 AI 分析…' : '正在浏览器内生成…';
   $('removeFile').disabled = true;
   $('assetInput').disabled = true;
+  $('templateInput').disabled = true;
+  $('removeTemplate').disabled = true;
+  $('aiAssist').disabled = true;
   await new Promise(resolve => setTimeout(resolve, 0));
   try {
     const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
@@ -132,8 +169,10 @@ async function generate() {
       filename: file.name,
       bytes: new Uint8Array(await file.arrayBuffer()),
     })));
+    const templateBytes = selectedTemplate ? new Uint8Array(await selectedTemplate.arrayBuffer()) : null;
     const { result, pptxBytes } = await generateDeck({
       filename: selectedFile.name, fileBytes, assets, style: $('styleSelect').value,
+      templateBytes, templateName: selectedTemplate?.name || '', useAI: $('aiAssist').checked,
     }, setPipeline);
     if (!result.fidelity || result.fidelity.missing_blocks.length) {
       throw new Error('原文回读存在遗漏，已阻止交付。请检查来源内容或重新导出文件。');
@@ -180,11 +219,27 @@ function renderShape(element) {
 }
 
 function renderImage(element) {
+  if (element.previewUnsupported) {
+    const fallback = document.createElement('div');
+    placeElement(fallback, element);
+    fallback.textContent = `${element.previewFormat || '此格式'} 原图已保留\n下载 PPTX 后在 WPS 中查看`;
+    fallback.style.display = 'flex';
+    fallback.style.alignItems = 'center';
+    fallback.style.justifyContent = 'center';
+    fallback.style.textAlign = 'center';
+    fallback.style.whiteSpace = 'pre-line';
+    fallback.style.padding = '16px';
+    fallback.style.boxSizing = 'border-box';
+    fallback.style.color = '#647472';
+    fallback.style.background = '#f3f1eb';
+    fallback.style.font = '14px "Microsoft YaHei", sans-serif';
+    return fallback;
+  }
   const node = document.createElement('img');
   placeElement(node, element);
   node.src = element.src || '';
   node.alt = element.alt || '';
-  node.style.objectFit = 'contain';
+  node.style.objectFit = element.fit === 'fill' ? 'fill' : 'contain';
   return node;
 }
 
@@ -199,7 +254,7 @@ function renderText(element) {
   for (const paragraph of element.paragraphs || []) {
     const p = document.createElement('p');
     p.style.textAlign = paragraph.align || 'left';
-    p.style.lineHeight = String((paragraph.lineSpacingPct || 110) / 100);
+    p.style.lineHeight = String((paragraph.lineSpacingPct || 130) / 100);
     p.style.marginBottom = `${paragraph.spaceAfterPt || 0}px`;
     p.style.width = '100%';
     if (paragraph.bullet) p.style.paddingLeft = '1em';
@@ -210,7 +265,8 @@ function renderText(element) {
       span.style.fontWeight = run.bold ? '700' : '400';
       span.style.fontStyle = run.italic ? 'italic' : 'normal';
       span.style.color = color(run.color, '#153b3c');
-      span.style.fontFamily = '"Microsoft YaHei", "PingFang SC", Arial, sans-serif';
+      const family = String(run.font || 'Microsoft YaHei').replace(/["'\\\n\r]/g, '');
+      span.style.fontFamily = `"${family}", "Microsoft YaHei", "PingFang SC", Arial, sans-serif`;
       p.appendChild(span);
     }
     node.appendChild(p);
@@ -263,7 +319,23 @@ function renderResult(result, pptxBytes) {
   showOnly('resultState');
   setPipeline('complete');
   $('deckTitle').textContent = result.title;
-  $('deckMeta').textContent = `${result.format.toUpperCase()} 入口 · ${result.blockCount} 条原文 · 原生可编辑对象`;
+  $('deckMeta').textContent = `${result.format.toUpperCase()} 入口 · ${result.blockCount} 条原文 · 原生可编辑对象${result.template ? ` · 已套用 ${result.template.name}` : ''}`;
+  const templateSummary = $('templateSummary');
+  templateSummary.classList.toggle('hidden', !result.template);
+  if (result.template) {
+    const backgroundNames = { image: '图片背景', color: '纯色背景' };
+    const fonts = [result.template.titleFont, result.template.bodyFont].filter(Boolean).join(' / ') || '回退字体';
+    templateSummary.textContent = `模板：${fonts}；封面 ${backgroundNames[result.template.coverBackground]}，正文 ${backgroundNames[result.template.contentBackground]}。${result.template.limitations}${result.template.warnings.length ? ` ${result.template.warnings.join(' ')}` : ''}`;
+  } else {
+    templateSummary.textContent = '';
+  }
+  const aiSummary = $('aiSummary');
+  aiSummary.classList.toggle('hidden', !result.ai);
+  aiSummary.textContent = result.ai
+    ? (result.ai.applied
+      ? `AI 结构分析已完成：调整 ${result.ai.changed} 个文字块；原文未改写${result.ai.model ? `；模型 ${result.ai.model}` : ''}。`
+      : `AI 未应用：${result.ai.warning}`)
+    : '';
   const ratio = result.fidelity.source_blocks ? result.fidelity.matched_blocks / result.fidelity.source_blocks : 0;
   $('metricFidelity').textContent = `${Math.round(ratio * 100)}%`;
   $('metricPages').textContent = result.pageCount;
@@ -310,6 +382,8 @@ function renderResult(result, pptxBytes) {
 
   const timings = [
     ['内容解析', result.timings.parse_seconds],
+    ['模板解析', result.timings.template_parse_seconds],
+    ['AI 结构分析', result.timings.ai_seconds],
     ['页面规划', result.timings.plan_seconds],
     ['计划 JSON 写出', result.timings.plan_json_write_seconds],
     ['PPTX 原生写入', result.timings.write_seconds],
@@ -384,6 +458,11 @@ $('assetInput').addEventListener('change', event => {
   $('assetNames').textContent = files.length ? files.map(file => file.name).join('、') : 'Markdown 中按文件名引用 PNG/JPEG';
 });
 $('removeFile').addEventListener('click', clearFile);
+$('templateInput').addEventListener('change', event => {
+  if (event.target.files[0]) setTemplate(event.target.files[0]);
+  else clearTemplate();
+});
+$('removeTemplate').addEventListener('click', clearTemplate);
 $('sampleButton').addEventListener('click', async () => {
   if (busy) return;
   $('sampleButton').disabled = true;

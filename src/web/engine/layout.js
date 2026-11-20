@@ -1,4 +1,7 @@
-const FONT = 'Microsoft YaHei';
+let FONT = 'Microsoft YaHei';
+let TITLE_FONT = FONT;
+const BODY_LINE_SPACING = 130;
+const IMPORTED_TEXT_LINE_FACTOR = 1.3;
 const THEMES = {
   paper: {
     background: '#F3F1EB', ink: '#153B3C', muted: '#647472',
@@ -14,6 +17,71 @@ const THEMES = {
   },
 };
 let THEME = { ...THEMES.paper };
+
+function rgb(value) {
+  if (!/^#[0-9a-f]{6}$/i.test(value || '')) return null;
+  return [1, 3, 5].map(offset => parseInt(value.slice(offset, offset + 2), 16));
+}
+
+function mixColor(from, to, amount) {
+  const left = rgb(from);
+  const right = rgb(to);
+  if (!left || !right) return from;
+  return `#${left.map((value, index) => Math.round(value * (1 - amount) + right[index] * amount)
+    .toString(16).padStart(2, '0')).join('')}`.toUpperCase();
+}
+
+function luminance(value) {
+  const channels = rgb(value);
+  if (!channels) return 1;
+  const linear = channels.map(channel => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrast(first, second) {
+  const left = luminance(first);
+  const right = luminance(second);
+  return (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+}
+
+function templateTheme(base, reference, visualTemplate) {
+  const background = rgb(reference.background) ? reference.background : base.background;
+  const brightness = Number.isFinite(reference.imageLuminance)
+    ? reference.imageLuminance
+    : luminance(background);
+  const dark = brightness < 0.42;
+  const colors = reference.colors || visualTemplate.colors || {};
+  const themedInk = colors[dark ? 'lt1' : 'dk1'];
+  let ink = rgb(themedInk) ? themedInk : (dark ? '#F7F7F2' : '#142B33');
+  if (!reference.image && contrast(ink, background) < 3) ink = dark ? '#F7F7F2' : '#142B33';
+  let accent = rgb(colors.accent1) ? colors.accent1 : base.accent;
+  let secondary = rgb(colors.accent2) ? colors.accent2 : base.secondary;
+  if (!reference.image && contrast(accent, background) < 1.5) accent = mixColor(accent, ink, 0.45);
+  if (!reference.image && contrast(secondary, background) < 1.5) secondary = mixColor(secondary, ink, 0.45);
+  return {
+    background,
+    ink,
+    muted: mixColor(ink, background, 0.32),
+    accent,
+    secondary,
+    card: mixColor(background, '#FFFFFF', dark ? 0.1 : 0.9),
+    line: mixColor(ink, background, 0.78),
+  };
+}
+
+function backgroundElements(reference = null) {
+  const elements = [shape('rect', 0, 0, 1280, 720, reference?.background || THEME.background)];
+  if (reference?.image) {
+    elements.push({
+      type: 'image', asset: reference.image, alt: '模板背景',
+      x: 0, y: 0, w: 1280, h: 720, fit: 'fill', templateBackground: true,
+    });
+  }
+  return elements;
+}
 
 function clean(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -126,21 +194,21 @@ function estimatedLines(value, width, sizePt) {
   }, 0);
 }
 
-function fitFontSize(value, width, height, size, minimum = 10) {
+function fitFontSize(value, width, height, size, minimum = 10, lineSpacingPct = BODY_LINE_SPACING, lineHeightFactor = 1) {
   let candidate = size;
   while (candidate > minimum) {
-    const lineHeight = candidate * 96 / 72 * 1.1;
+    const lineHeight = candidate * 96 / 72 * lineSpacingPct / 100 * lineHeightFactor;
     if (estimatedLines(value, width, candidate) * lineHeight <= height) break;
-    candidate -= 0.5;
+    candidate = Math.round((candidate - 0.5) * 10) / 10;
   }
   return Math.round(candidate * 10) / 10;
 }
 
-function text(x, y, w, h, value, size = 16, color = null, bold = false, align = 'left') {
-  size = fitFontSize(value, w, h, size);
+function text(x, y, w, h, value, size = 16, color = null, bold = false, align = 'left', minimum = 10, lineSpacingPct = BODY_LINE_SPACING, lineHeightFactor = 1, font = null) {
+  size = fitFontSize(value, w, h, size, minimum, lineSpacingPct, lineHeightFactor);
   const paragraphs = String(value).split('\n').map(part => ({
     align,
-    lineSpacingPct: 110,
+    lineSpacingPct,
     spaceAfterPt: 0,
     bullet: false,
     runs: [{
@@ -149,7 +217,7 @@ function text(x, y, w, h, value, size = 16, color = null, bold = false, align = 
       bold,
       italic: false,
       color: color || THEME.ink,
-      font: FONT,
+      font: font || FONT,
     }],
   }));
   return { type: 'text', x, y, w, h, valign: 'top', paragraphs };
@@ -163,9 +231,9 @@ function shape(kind, x, y, w, h, fill, stroke = null) {
 
 function bodySize(value, widthChars = 28) {
   const lines = Math.max(1, Math.floor((codePointLength(value) + widthChars - 1) / widthChars));
-  if (lines >= 5) return 12.5;
-  if (lines >= 3) return 14;
-  return 16;
+  if (lines >= 5) return 14;
+  if (lines >= 3) return 16;
+  return 18;
 }
 
 function chooseLayout(section, index) {
@@ -206,15 +274,17 @@ function splitItems(items) {
   return chunks;
 }
 
-function basePage(titleValue, pageNumber, sectionIndex, sectionCount, motion, fade) {
-  const elements = [
-    shape('rect', 0, 0, 1280, 720, THEME.background),
-    text(170, 38, 400, 28, 'CONTENT / FORM', 10, THEME.accent, true),
-    text(170, 76, 940, 66, titleValue, 30, THEME.ink, true),
+function basePage(titleValue, pageNumber, sectionIndex, sectionCount, motion, fade, visualPage = null) {
+  const elements = backgroundElements(visualPage);
+  const brandIndex = elements.length;
+  elements.push(text(170, 38, 400, 28, 'CONTENT / FORM', 10, THEME.accent, true));
+  const titleIndex = elements.length;
+  elements.push(
+    text(170, 76, 940, 66, titleValue, 30, THEME.ink, true, 'left', 10, 110, 1, TITLE_FONT),
     shape('line', 170, 156, 1010, 1, '#00000000', THEME.line),
     text(1080, 46, 100, 28, String(pageNumber).padStart(2, '0'), 12, THEME.muted, true, 'right'),
-  ];
-  fade.push(1, 2);
+  );
+  fade.push(brandIndex, titleIndex);
   if (sectionCount) {
     const top = 205;
     const gap = Math.min(66, 300 / Math.max(1, sectionCount - 1));
@@ -340,7 +410,7 @@ function renderItems(layout, items, elements, fade) {
   for (let index = start; index < elements.length; index += 1) fade.push(index);
 }
 
-function coverPage(model) {
+function coverPage(model, visualPage = null) {
   const leadText = model.lead.filter(item => item.kind !== 'image');
   const coverImage = model.lead.find(item => item.kind === 'image') || null;
   const subtitle = leadText.length ? leadText.map(item => item.text).join('\n') : '内容解析 · 自动分页 · 原生可编辑';
@@ -348,26 +418,30 @@ function coverPage(model) {
   const visual = coverImage
     ? [image(coverImage.asset, 790, 105, 390, 450, coverImage.text)]
     : [shape('ellipse', 890, 90, 290, 290, THEME.accent), shape('donut', 830, 330, 330, 330, THEME.secondary)];
-  const elements = [
-    shape('rect', 0, 0, 1280, 720, THEME.background),
-    ...visual,
-    text(80, 64, 500, 30, 'INTELLIGENT PPT / 01', 11, THEME.accent, true),
-    text(80, 175, 760, 190, model.title, 42, THEME.ink, true),
+  const elements = backgroundElements(visualPage);
+  elements.push(...visual);
+  const brandIndex = elements.length;
+  elements.push(text(80, 64, 500, 30, 'INTELLIGENT PPT / 01', 11, THEME.accent, true));
+  const titleIndex = elements.length;
+  elements.push(text(80, 175, 760, 190, model.title, 42, THEME.ink, true, 'left', 10, 110, 1, TITLE_FONT));
+  const subtitleIndex = elements.length;
+  elements.push(
     text(84, 400, 650, 170, subtitle, subtitleSize, THEME.muted),
     shape('line', 84, 590, 1090, 1, '#00000000', THEME.line),
     text(84, 618, 450, 28, 'SOURCE → STRUCTURE → SLIDES', 10, THEME.muted, true),
     text(1070, 612, 100, 34, '01', 14, THEME.ink, true, 'right'),
-  ];
-  return [{ background: THEME.background, elements }, [3, 4, 5]];
+  );
+  return [{ background: THEME.background, elements }, [brandIndex, titleIndex, subtitleIndex]];
 }
 
-function overviewPage(sections, offset = 0, total = null, title = '内容结构', countText = null) {
-  const elements = [
-    shape('rect', 0, 0, 1280, 720, THEME.background),
+function overviewPage(sections, offset = 0, total = null, title = '内容结构', countText = null, visualPage = null) {
+  const elements = backgroundElements(visualPage);
+  const fadeStart = elements.length;
+  elements.push(
     text(80, 58, 300, 28, 'STRUCTURE', 11, THEME.accent, true),
-    text(80, 104, 600, 70, title, 36, THEME.ink, true),
+    text(80, 104, 600, 70, title, 36, THEME.ink, true, 'left', 10, 110, 1, TITLE_FONT),
     text(970, 110, 190, 50, countText || `${String(total === null ? sections.length : total).padStart(2, '0')} 部分`, 18, THEME.secondary, true, 'right'),
-  ];
+  );
   sections.forEach((section, index) => {
     const x = 80 + (index % 2) * 575;
     const y = 230 + Math.floor(index / 2) * 150;
@@ -375,7 +449,8 @@ function overviewPage(sections, offset = 0, total = null, title = '内容结构'
     elements.push(text(x + 92, y, 440, 92, section.title, 20, THEME.ink, true));
     elements.push(shape('line', x + 92, y + 100, 420, 1, '#00000000', THEME.line));
   });
-  return { background: THEME.background, elements };
+  const fade = Array.from({ length: elements.length - fadeStart }, (_, index) => fadeStart + index);
+  return [{ background: THEME.background, elements }, fade];
 }
 
 function overviewTitleKey(value) {
@@ -414,14 +489,272 @@ function matchedSourceOverview(model) {
   return { source, sections: displaySections, count_text: countText };
 }
 
-export function planPages(model, style = 'paper') {
+function importedBox(item) {
+  const sourceWidth = item.width > 0 ? item.width : 900;
+  const sourceHeight = item.height > 0 ? item.height : 100;
+  const rawX = 170 + (item.left || 0) / 1280 * 1000;
+  const rawY = 180 + ((item.top || 0) - 100) / 600 * 450;
+  const rawW = sourceWidth / 1280 * 1000;
+  const rawH = sourceHeight / 600 * 450;
+  const x = Math.max(160, Math.min(1160, pyRound(rawX)));
+  const y = Math.max(180, Math.min(620, pyRound(rawY)));
+  return {
+    x, y,
+    w: Math.max(30, Math.min(1180 - x, pyRound(rawW))),
+    h: Math.max(20, Math.min(650 - y, pyRound(rawH))),
+    scale: Math.min(1, rawW / sourceWidth, rawH / sourceHeight),
+  };
+}
+
+function boxesOverlap(first, second) {
+  return first.x < second.x + second.w && first.x + first.w > second.x
+    && first.y < second.y + second.h && first.y + first.h > second.y;
+}
+
+function importedBottom(box, boxes, ignored = new Set()) {
+  let bottom = 650;
+  for (const other of boxes.values()) {
+    if (other === box || ignored.has(other) || other.y <= box.y + 4) continue;
+    const overlap = Math.min(box.x + box.w, other.x + other.w) - Math.max(box.x, other.x);
+    if (overlap * 2 >= Math.min(box.w, other.w)) bottom = Math.min(bottom, other.y - 12);
+  }
+  return Math.max(box.y + 20, bottom);
+}
+
+function importedBackground(box) {
+  return box.w >= 700 && box.h >= 400;
+}
+
+function importedText(value) {
+  return String(value).replace(/[ \t]+(?=•)/g, '\n');
+}
+
+function importedFontSize(item, box) {
+  if (box.compactLabel) return 16;
+  return Math.max(10, Math.min(28, (item.font_size || 16) * 0.94));
+}
+
+function importedLayoutBoxes(items) {
+  const boxes = new Map(items.map(item => [item.id, importedBox(item)]));
+  const labels = items.filter(item => item.kind !== 'image' && item.kind !== 'table'
+    && (item.font_size || 0) >= 24 && !String(item.text).includes('\n')
+    && codePointLength(clean(item.text)) <= 8);
+  const groups = [];
+  const groupedBodies = new Set();
+  const groupedLabels = new Set();
+  for (const label of labels) {
+    const labelBox = boxes.get(label.id);
+    const candidates = items.filter(item => item !== label && !labels.includes(item)
+      && item.kind !== 'image' && item.kind !== 'table' && !groupedBodies.has(boxes.get(item.id)))
+      .map(item => ({ item, box: boxes.get(item.id) }))
+      .filter(({ box }) => box.y >= 180 && box.x >= labelBox.x + labelBox.w * 0.5
+        && labelBox.y < box.y + box.h && labelBox.y + labelBox.h > box.y)
+      .sort((first, second) => Math.abs(first.box.y - labelBox.y) - Math.abs(second.box.y - labelBox.y)
+        || first.box.x - second.box.x);
+    if (!candidates.length) continue;
+    const { item: body, box: bodyBox } = candidates[0];
+    const right = bodyBox.x + bodyBox.w;
+    bodyBox.x = labelBox.x;
+    bodyBox.y = Math.max(214, bodyBox.y);
+    bodyBox.w = Math.max(80, right - bodyBox.x);
+    labelBox.y = bodyBox.y - 34;
+    labelBox.w = bodyBox.w;
+    labelBox.h = 28;
+    labelBox.compactLabel = true;
+    groups.push({ labelBox, bodyBox });
+    groupedBodies.add(bodyBox);
+    groupedLabels.add(labelBox);
+  }
+
+  const pictures = items.filter(item => item.kind === 'image' && item.asset)
+    .map(item => boxes.get(item.id))
+    .filter(box => !importedBackground(box));
+  for (const item of items) {
+    if (item.kind === 'image') continue;
+    const box = boxes.get(item.id);
+    for (const picture of pictures) {
+      if (!boxesOverlap(box, picture)) continue;
+      const leftWidth = picture.x - 16 - box.x;
+      const rightWidth = box.x + box.w - (picture.x + picture.w + 16);
+      const useLeft = box.x + box.w / 2 <= picture.x + picture.w / 2;
+      if ((useLeft && leftWidth >= 80) || rightWidth < 80) {
+        box.w = Math.max(30, Math.min(box.w, leftWidth));
+      } else if (rightWidth >= 80) {
+        const right = box.x + box.w;
+        box.x = picture.x + picture.w + 16;
+        box.w = Math.max(30, right - box.x);
+      } else {
+        box.h = Math.max(20, Math.min(box.h, picture.y - 16 - box.y));
+      }
+    }
+    if (item.kind !== 'table') {
+      const size = importedFontSize(item, box);
+      const lineHeight = size * 96 / 72 * BODY_LINE_SPACING / 100;
+      const needed = Math.ceil(estimatedLines(importedText(item.text), box.w * 0.94, size) * lineHeight + 4);
+      box.contentHeight = Math.max(20, needed);
+      const ignored = groupedBodies.has(box) || groupedLabels.has(box)
+        ? new Set([...groupedBodies, ...groupedLabels]) : groupedLabels;
+      box.h = Math.max(20, Math.min(importedBottom(box, boxes, ignored) - box.y, Math.max(box.h, needed)));
+    }
+  }
+
+  const arranged = [];
+  for (const group of groups.sort((first, second) => first.bodyBox.y - second.bodyBox.y)) {
+    const previous = arranged.slice().reverse().find(other => {
+      const overlap = Math.min(group.bodyBox.x + group.bodyBox.w, other.bodyBox.x + other.bodyBox.w)
+        - Math.max(group.bodyBox.x, other.bodyBox.x);
+      return overlap * 2 >= Math.min(group.bodyBox.w, other.bodyBox.w);
+    });
+    if (previous) {
+      const right = group.bodyBox.x + group.bodyBox.w;
+      group.bodyBox.x = previous.bodyBox.x;
+      group.bodyBox.w = Math.max(80, right - group.bodyBox.x);
+      group.labelBox.x = group.bodyBox.x;
+      group.labelBox.w = group.bodyBox.w;
+      group.bodyBox.y = Math.min(630, previous.bodyBox.y + previous.bodyBox.h + 58);
+      group.bodyBox.h = Math.max(20, Math.min(group.bodyBox.h, 650 - group.bodyBox.y));
+      group.labelBox.y = group.bodyBox.y - 34;
+    }
+    arranged.push(group);
+  }
+
+  if (!pictures.length && !items.some(item => item.kind === 'table')) {
+    const candidates = items.filter(item => item.kind !== 'image' && item.kind !== 'table')
+      .map(item => boxes.get(item.id))
+      .filter(box => !groupedBodies.has(box) && !groupedLabels.has(box))
+      .sort((first, second) => first.x - second.x || first.y - second.y);
+    const columns = [];
+    for (const box of candidates) {
+      let column = columns.find(candidate => Math.abs(candidate[0].x - box.x) <= 24
+        && Math.abs(candidate[0].w - box.w) <= 80);
+      if (!column) {
+        column = [];
+        columns.push(column);
+      }
+      column.push(box);
+    }
+    const sourceByBox = new Map(items.filter(item => item.kind !== 'image' && item.kind !== 'table')
+      .map(item => [boxes.get(item.id), item]));
+    for (const column of columns) {
+      const singleTextColumn = columns.length === 1 && column.length >= 2;
+      if (!singleTextColumn && column.length < 3) continue;
+      column.sort((first, second) => first.y - second.y);
+      const gap = singleTextColumn ? 16 : 12;
+      if (singleTextColumn) {
+        const left = Math.min(...column.map(box => box.x));
+        const right = Math.max(...column.map(box => box.x + box.w));
+        if (left >= 300) {
+          for (const box of column) {
+            box.x = 206;
+            box.w = right - box.x;
+          }
+        }
+        for (const box of column) {
+          const item = sourceByBox.get(box);
+          const size = importedFontSize(item, box);
+          const lineHeight = size * 96 / 72 * BODY_LINE_SPACING / 100 * IMPORTED_TEXT_LINE_FACTOR;
+          const needed = Math.ceil(estimatedLines(importedText(item.text), box.w * 0.94, size) * lineHeight + 4);
+          box.contentHeight = Math.max(20, needed);
+          box.lineHeightFactor = IMPORTED_TEXT_LINE_FACTOR;
+        }
+      }
+      const start = column[0].y;
+      const available = 650 - start - gap * (column.length - 1);
+      const desired = column.reduce((total, box) => total + (box.contentHeight || box.h), 0);
+      const scale = Math.min(1, available / Math.max(1, desired));
+      let y = start;
+      for (const box of column) {
+        box.y = pyRound(y);
+        box.h = Math.max(20, Math.min(650 - box.y, pyRound((box.contentHeight || box.h) * scale)));
+        y = box.y + box.h + gap;
+      }
+    }
+  }
+  return boxes;
+}
+
+function renderImportedTable(item, elements, box, boxes) {
+  const rows = item.rows && item.rows.length ? item.rows : [[item.text]];
+  const columns = Math.max(...rows.map(row => row.length), 1);
+  const columnWidth = box.w / columns;
+  const fontSize = Math.max(8, Math.min(10, (item.font_size || 15) * 0.6));
+  const lineHeight = fontSize * 96 / 72 * 1.1;
+  const desiredHeights = rows.map(row => {
+    let lines = 1;
+    for (let columnIndex = 0; columnIndex < columns; columnIndex += 1) {
+      lines = Math.max(lines, estimatedLines(row[columnIndex] || '', Math.max(1, columnWidth - 10) * 0.85, fontSize));
+    }
+    return lines * lineHeight + 12;
+  });
+  const desiredTotal = desiredHeights.reduce((total, height) => total + height, 0);
+  box.h = Math.min(importedBottom(box, boxes) - box.y, Math.max(box.h, desiredTotal, rows.length * (rows.length <= 6 ? 48 : 40)));
+  const heightScale = box.h / desiredTotal;
+  let rowTop = box.y;
+  rows.forEach((row, rowIndex) => {
+    const rowHeight = desiredHeights[rowIndex] * heightScale;
+    for (let columnIndex = 0; columnIndex < columns; columnIndex += 1) {
+      const x = pyRound(box.x + columnIndex * columnWidth);
+      const y = pyRound(rowTop);
+      const w = Math.max(1, pyRound(columnWidth));
+      const h = Math.max(1, pyRound(rowHeight));
+      elements.push(shape('rect', x, y, w, h, rowIndex === 0 ? THEME.line : THEME.card, THEME.line));
+      elements.push(text(x + 5, y + 4, Math.max(1, w - 10), Math.max(1, h - 8), row[columnIndex] || '',
+        fontSize, THEME.ink, rowIndex === 0, 'center', 8, 110));
+    }
+    rowTop += rowHeight;
+  });
+}
+
+function importedContentPage(plan, pageNumber, motion, fade, visualPage = null) {
+  const elements = basePage(plan.title, pageNumber, plan.section_index, plan.section_count, motion, fade, visualPage);
+  const start = elements.length;
+  const boxes = importedLayoutBoxes(plan.items);
+  const backgrounds = plan.items.filter(item => item.kind === 'image' && item.asset && importedBackground(boxes.get(item.id)));
+  const orderedItems = backgrounds.concat(plan.items.filter(item => !backgrounds.includes(item)));
+  for (const item of orderedItems) {
+    const box = boxes.get(item.id);
+    if (item.kind === 'table') {
+      renderImportedTable(item, elements, box, boxes);
+      continue;
+    }
+    if (item.kind === 'image' && item.asset) {
+      elements.push(shape('roundRect', box.x - 4, box.y - 4, box.w + 8, box.h + 8, THEME.card, THEME.line));
+      elements.push(image(item.asset, box.x, box.y, box.w, box.h, item.text));
+      continue;
+    }
+    const size = importedFontSize(item, box);
+    const value = box.compactLabel ? item.text : importedText(item.text);
+    const paragraphs = value.split('\n');
+    if (plan.items.length === 1 && paragraphs.length > 12) {
+      const middle = Math.ceil(paragraphs.length / 2);
+      [paragraphs.slice(0, middle), paragraphs.slice(middle)].forEach((column, columnIndex) => {
+        elements.push(text(180 + columnIndex * 515, 180, 485, 470, column.join('\n'),
+          13, THEME.ink, false, 'left', 11));
+      });
+      continue;
+    }
+    elements.push(text(box.x, box.y, box.w, box.h, value, size, THEME.ink,
+      box.compactLabel || item.font_size >= 24, 'left', 11, BODY_LINE_SPACING, box.lineHeightFactor || 1));
+  }
+  for (let index = start; index < elements.length; index += 1) fade.push(index);
+  return { background: THEME.background, elements };
+}
+
+export function planPages(model, style = 'paper', visualTemplate = null) {
   if (!Object.prototype.hasOwnProperty.call(THEMES, style)) throw new Error(`未知主题：${style}`);
-  THEME = { ...THEMES[style] };
+  const baseTheme = { ...THEMES[style] };
+  THEME = { ...baseTheme };
+  FONT = visualTemplate?.fonts?.body || 'Microsoft YaHei';
+  TITLE_FONT = visualTemplate?.fonts?.title || FONT;
   const coverSources = (model.title_id ? [model.title_id] : []).concat(model.lead.map(item => item.id));
   const plans = [{ kind: 'cover', title: model.title, layout: 'cover', source_ids: coverSources }];
-  const sourceOverview = matchedSourceOverview(model);
+  const imported = model.source.format === 'pptx' && Array.isArray(model.chapters) && model.chapters.length > 0;
+  const importedOverview = imported ? model.sections.find(section => /^(?:内容结构|目录|大纲|CONTENTS)$/i.test(section.title)) : null;
+  const sourceOverview = importedOverview
+    ? { source: importedOverview, sections: model.chapters, count_text: null }
+    : matchedSourceOverview(model);
   const sourceOverviewTitle = Boolean(model.sections.length && /^(?:内容结构|目录|大纲|CONTENTS)$/i.test(model.sections[0].title));
-  const contentSections = sourceOverview ? model.sections.slice(1) : model.sections;
+  const contentSections = sourceOverview ? model.sections.filter(section => section !== sourceOverview.source) : model.sections;
   const overviewSections = sourceOverview ? sourceOverview.sections : contentSections;
   if (sourceOverview || (contentSections.length >= 3 && !sourceOverviewTitle)) {
     const overviewTitle = sourceOverview ? sourceOverview.source.title : '内容结构';
@@ -445,8 +778,8 @@ export function planPages(model, style = 'paper') {
     }
   }
   contentSections.forEach((section, sectionIndex) => {
-    const layout = chooseLayout(section, sectionIndex);
-    const chunks = splitItems(section.items);
+    const layout = imported ? 'imported' : chooseLayout(section, sectionIndex);
+    const chunks = imported ? [section.items] : splitItems(section.items);
     chunks.forEach((chunk, chunkIndex) => {
       const suffix = chunkIndex ? '（续）' : '';
       const sourceIds = section.heading_id && chunkIndex === 0 ? [section.heading_id] : [];
@@ -455,14 +788,21 @@ export function planPages(model, style = 'paper') {
         kind: 'content',
         title: section.title + suffix,
         layout,
-        section_index: sectionIndex,
-        section_count: contentSections.length,
+        section_index: imported ? section.chapter_index : sectionIndex,
+        section_count: imported ? model.chapters.length : contentSections.length,
+        source_slide: section.source_slide,
         items: chunk.map(item => ({
           id: item.id,
           kind: item.kind,
           text: item.text,
           numbers: item.numbers,
           asset: item.asset === undefined ? null : item.asset,
+          rows: item.rows || null,
+          top: item.top,
+          left: item.left,
+          width: item.width,
+          height: item.height,
+          font_size: item.font_size,
         })),
         source_ids: sourceIds,
       });
@@ -472,16 +812,21 @@ export function planPages(model, style = 'paper') {
   const pages = [];
   plans.forEach((plan, planIndex) => {
     const pageNumber = planIndex + 1;
+    const visualPage = visualTemplate
+      ? (plan.kind === 'cover' ? visualTemplate.cover : visualTemplate.content)
+      : null;
+    THEME = visualPage ? templateTheme(baseTheme, visualPage, visualTemplate) : { ...baseTheme };
     const motion = [];
     let fade = [];
     let page;
     if (plan.kind === 'cover') {
-      [page, fade] = coverPage(model);
+      [page, fade] = coverPage(model, visualPage);
     } else if (plan.kind === 'overview') {
-      page = overviewPage(plan.overview_sections, plan.overview_start, contentSections.length, plan.overview_title, plan.overview_count);
-      fade = Array.from({ length: Math.max(0, page.elements.length - 1) }, (_, index) => index + 1);
+      [page, fade] = overviewPage(plan.overview_sections, plan.overview_start, overviewSections.length, plan.overview_title, plan.overview_count, visualPage);
+    } else if (plan.layout === 'imported') {
+      page = importedContentPage(plan, pageNumber, motion, fade, visualPage);
     } else {
-      const elements = basePage(plan.title, pageNumber, plan.section_index, plan.section_count, motion, fade);
+      const elements = basePage(plan.title, pageNumber, plan.section_index, plan.section_count, motion, fade, visualPage);
       renderItems(plan.layout, plan.items, elements, fade);
       page = { background: THEME.background, elements };
     }

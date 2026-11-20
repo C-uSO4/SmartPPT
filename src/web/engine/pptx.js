@@ -59,7 +59,7 @@ function shapeXml(element, shapeId, name) {
 
 function paragraphXml(paragraph) {
   const align = { left: 'l', center: 'ctr', right: 'r', justify: 'just' }[paragraph.align || 'left'] || 'l';
-  const spacing = Math.round(Number(paragraph.lineSpacingPct ?? 110) * 1000);
+  const spacing = Math.round(Number(paragraph.lineSpacingPct ?? 130) * 1000);
   const after = Math.round(Number(paragraph.spaceAfterPt ?? 0) * 100);
   const runs = [];
   for (const run of paragraph.runs || []) {
@@ -181,7 +181,11 @@ function imageBytes(element, pageNumber) {
   if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
     return { bytes, extension: '.jpg' };
   }
-  throw pptxError('图片仅支持有效的 PNG 或 JPEG 文件');
+  if (bytes.length >= 88 && bytes[0] === 1 && bytes[1] === 0 && bytes[2] === 0 && bytes[3] === 0
+      && bytes[40] === 0x20 && bytes[41] === 0x45 && bytes[42] === 0x4D && bytes[43] === 0x46) {
+    return { bytes, extension: '.emf' };
+  }
+  throw pptxError('图片仅支持有效的 PNG、JPEG 或 EMF 文件');
 }
 
 function slideXml(pageJob) {
@@ -200,7 +204,7 @@ function slideXml(pageJob) {
       shapes.push(pictureXml(element, shapeId, name, `rId${pictureCount + 1}`));
       pictures.push(imageBytes(element, pageJob.number));
     } else {
-      throw pptxError('本地渲染器仅接受文字、形状和 PNG/JPEG 图片');
+      throw pptxError('本地渲染器仅接受文字、形状和 PNG/JPEG/EMF 图片');
     }
   });
   const background = String(page.background || DEFAULT_BACKGROUND).replace(/^#+/, '').slice(0, 6).toUpperCase();
@@ -237,7 +241,7 @@ function slideRelsXml(pictures) {
 function updateContentTypes(source, pages) {
   let contentTypes = source.replace(/<Override\b[^>]*\bPartName=(["'])\/ppt\/slides\/slide\d+\.xml\1[^>]*\/\s*>/gi, '');
   const defaults = [];
-  for (const [extension, mime] of [['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg']]) {
+  for (const [extension, mime] of [['png', 'image/png'], ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['emf', 'image/x-emf']]) {
     const pattern = new RegExp(`<Default\\b[^>]*\\bExtension=(["'])${extension}\\1`, 'i');
     if (!pattern.test(contentTypes)) defaults.push(`<Default Extension="${extension}" ContentType="${mime}"/>`);
   }
@@ -387,12 +391,13 @@ export async function auditPackage(pptxBytes, model) {
   }
   const allText = clean(slideTexts.join(' '));
   const missing = [];
-  for (const item of model.blocks) {
+  const auditedBlocks = model.blocks.filter(item => item.audit !== false);
+  for (const item of auditedBlocks) {
     if (!allText.includes(clean(item.text))) missing.push({ id: item.id, text: item.text, source: item.source });
   }
   return {
-    source_blocks: model.blocks.length,
-    matched_blocks: model.blocks.length - missing.length,
+    source_blocks: auditedBlocks.length,
+    matched_blocks: auditedBlocks.length - missing.length,
     missing_blocks: missing,
     slides: slideNames.length,
   };

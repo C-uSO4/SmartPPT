@@ -75,6 +75,7 @@ function namespacedAttribute(node, namespace, name, fallback = '') {
 }
 
 function parseXml(source) {
+  if (/<!DOCTYPE/i.test(source)) throw new Error('XML 包含不支持的 DOCTYPE');
   const document = new DOMParser().parseFromString(source, 'application/xml');
   const root = document.documentElement;
   const parserError = (root && root.localName === 'parsererror')
@@ -128,15 +129,18 @@ function imageExtension(data) {
   const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   if (data.length >= 8 && png.every((value, index) => data[index] === value)) return '.png';
   if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return '.jpg';
-  throw new Error('图片仅支持有效的 PNG 或 JPEG 文件');
+  if (data.length >= 88 && data[0] === 1 && data[1] === 0 && data[2] === 0 && data[3] === 0
+    && data[40] === 0x20 && data[41] === 0x45 && data[42] === 0x4d && data[43] === 0x46) return '.emf';
+  throw new Error('图片仅支持有效的 PNG、JPEG 或 EMF 文件');
 }
 
 function imageDimensions(data) {
-  if (data.length >= 24 && imageExtension(data) === '.png') {
+  const extension = imageExtension(data);
+  if (data.length >= 24 && extension === '.png') {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     return [view.getUint32(16), view.getUint32(20)];
   }
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+  if (extension === '.jpg') {
     let offset = 2;
     while (offset + 9 < data.length) {
       if (data[offset] !== 0xff) {
@@ -154,14 +158,20 @@ function imageDimensions(data) {
       offset += 2 + Math.max(1, length);
     }
   }
+  if (extension === '.emf') {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const width = view.getInt32(32, true) - view.getInt32(24, true);
+    const height = view.getInt32(36, true) - view.getInt32(28, true);
+    if (width > 0 && height > 0) return [1600, Math.max(1, Math.round(1600 * height / width))];
+  }
   return [1600, 900];
 }
 
 function makeAsset(name, bytes) {
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  imageExtension(data);
+  const extension = imageExtension(data);
   const [width, height] = imageDimensions(data);
-  return { name, bytes: data, width, height };
+  return { name, bytes: data, width, height, extension, previewable: extension !== '.emf' };
 }
 
 function decodeBase64(value, line) {
@@ -596,6 +606,25 @@ function shapeLeft(shape, parents = null) {
   return shapePosition(shape, parents)[0];
 }
 
+function shapeBounds(shape, parents = null) {
+  const [x, y] = shapePosition(shape, parents);
+  const transform = shapeXfrm(shape);
+  const extent = transform ? findPath(transform, [[A, 'ext']]) : null;
+  let width = integerValue(extent ? extent.getAttribute('cx') : null) / 9525;
+  let height = integerValue(extent ? extent.getAttribute('cy') : null) / 9525;
+  const parent = parents ? parents.get(shape) : null;
+  if (parent && matches(parent, P, 'grpSp')) {
+    const group = shapeXfrm(parent);
+    const groupExtent = group ? findPath(group, [[A, 'ext']]) : null;
+    const childExtent = group ? findPath(group, [[A, 'chExt']]) : null;
+    if (groupExtent && childExtent) {
+      width *= integerValue(groupExtent.getAttribute('cx'), 1) / Math.max(1, integerValue(childExtent.getAttribute('cx'), 1));
+      height *= integerValue(groupExtent.getAttribute('cy'), 1) / Math.max(1, integerValue(childExtent.getAttribute('cy'), 1));
+    }
+  }
+  return { left: x, top: y, width, height };
+}
+
 function placeholderType(shape) {
   const placeholder = findPath(shape, [[P, 'nvSpPr'], [P, 'nvPr'], [P, 'ph']]);
   return placeholder ? placeholder.getAttribute('type') || '' : '';
@@ -658,6 +687,7 @@ async function parsePptx(bytes) {
   const notes = [];
   const archive = await readZip(bytes);
   const slides = await presentationSlides(archive);
+  const mediaAssets = new Map();
   for (let slideIndex = 0; slideIndex < slides.length; slideIndex += 1) {
     const index = slideIndex + 1;
     const root = parseXml(await archive.text(slides[slideIndex]));
@@ -666,8 +696,8 @@ async function parsePptx(bytes) {
       for (const child of childElements(parent)) parents.set(child, parent);
     }
     const relationships = await relationshipTargets(archive, slides[slideIndex]);
-    const elements = Array.from(walk(root)).filter(element => element.namespaceURI === P && ['sp', 'graphicFrame'].includes(element.localName));
-    const shapes = elements.filter(shape => shapeText(shape).length);
+    const elements = Array.from(walk(root)).filter(element => element.namespaceURI === P && ['sp', 'pic', 'graphicFrame'].includes(element.localName));
+    const shapes = elements.filter(shape => matches(shape, P, 'sp') && shapeText(shape).length);
     let titleShape = shapes.find(shape => ['title', 'ctrTitle'].includes(placeholderType(shape))) || null;
     if (!titleShape && shapes.length) {
       const ordinary = shapes.filter(shape => matches(shape, P, 'sp'));
@@ -715,7 +745,6 @@ async function parsePptx(bytes) {
         subtitleShape = subtitleCandidates.reduce((best, shape) => shapeTop(shape, parents) < shapeTop(best, parents) ? shape : best, subtitleCandidates[0]);
       }
     }
-    let titleUsed = false;
     const orderedShapes = shapes.map((shape, order) => ({ shape, order })).sort((left, right) => {
       return shapeTop(left.shape, parents) - shapeTop(right.shape, parents)
         || shapeLeft(left.shape, parents) - shapeLeft(right.shape, parents)
@@ -724,29 +753,33 @@ async function parsePptx(bytes) {
     orderedShapes.forEach((shape, orderedIndex) => {
       const paragraphNodes = descendants(shape, A, 'p').filter(paragraph => officeParagraphText(paragraph));
       const paragraphs = shapeText(shape);
-      const hasBullets = paragraphNodes.some(paragraph => findPath(paragraph, [[A, 'pPr'], [A, 'buChar']])
-        || findPath(paragraph, [[A, 'pPr'], [A, 'buAutoNum']]));
-      paragraphs.forEach((value, paragraphIndex) => {
-        const source = { slide: index, shape: orderedIndex + 1, paragraph: paragraphIndex + 1 };
-        let item;
-        if (shape === titleShape && !titleUsed) {
-          item = block('heading', value, source, index === 1 ? 1 : 2);
-          titleUsed = true;
-        } else if (shape === subtitleShape || (shape === titleShape && index === 1)) {
-          item = block('subtitle', value, source);
-        } else if (paragraphs.length > 1 || hasBullets) {
-          item = block('bullet', value, source);
-        } else {
-          item = block('paragraph', value, source);
-        }
-        item.font_size = shapeFontSize(shape);
-        item.top = shapeTop(shape, parents);
-        item.left = shapeLeft(shape, parents);
-        blocks.push(item);
-      });
+      const bulletParagraphs = paragraphNodes.map(paragraph => Boolean(findPath(paragraph, [[A, 'pPr'], [A, 'buChar']])
+        || findPath(paragraph, [[A, 'pPr'], [A, 'buAutoNum']])));
+      const hasBullets = bulletParagraphs.some(Boolean);
+      const source = { slide: index, shape: orderedIndex + 1, paragraph: 1 };
+      let item;
+      if (shape === titleShape) {
+        item = block('heading', paragraphs.join('\n'), source, index === 1 ? 1 : 2);
+      } else if (shape === subtitleShape) {
+        item = block('subtitle', paragraphs.join('\n'), source);
+      } else {
+        const values = paragraphs.map((value, paragraphIndex) => bulletParagraphs[paragraphIndex] ? `• ${value}` : value);
+        item = block(hasBullets ? 'bullet' : 'paragraph', values.join('\n'), source);
+      }
+      Object.assign(item, shapeBounds(shape, parents), { font_size: shapeFontSize(shape) });
+      blocks.push(item);
     });
     for (const frame of elements) {
-      if (!matches(frame, P, 'graphicFrame') || shapeText(frame).length) continue;
+      if (!matches(frame, P, 'graphicFrame')) continue;
+      const table = firstDescendant(frame, A, 'tbl');
+      if (table) {
+        const rows = descendants(table, A, 'tr').map(row => descendants(row, A, 'tc').map(cell => shapeText(cell).join('\n')));
+        const item = block('table', rows.flat().join('\n'), { slide: index, shape: 0, paragraph: 1 });
+        Object.assign(item, shapeBounds(frame, parents), { font_size: shapeFontSize(frame), rows });
+        blocks.push(item);
+        continue;
+      }
+      if (shapeText(frame).length) continue;
       const diagramIds = [];
       for (const node of walk(frame)) {
         const id = node.getAttributeNS(R, 'dm');
@@ -763,6 +796,24 @@ async function parsePptx(bytes) {
           blocks.push(item);
         });
       }
+    }
+    for (const picture of elements) {
+      if (!matches(picture, P, 'pic')) continue;
+      const blip = firstDescendant(picture, A, 'blip');
+      const relation = relationships[namespacedAttribute(blip, R, 'embed')] || {};
+      if (!(relation.type || '').endsWith('/image') || !archive.has(relation.target)) continue;
+      let asset = mediaAssets.get(relation.target);
+      if (!asset) {
+        asset = makeAsset(pathBasename(relation.target), await archive.bytes(relation.target));
+        mediaAssets.set(relation.target, asset);
+      }
+      const properties = firstDescendant(picture, P, 'cNvPr');
+      const alt = clean(properties ? properties.getAttribute('descr') : '') || '原稿图片';
+      const item = block('image', alt, { slide: index, shape: 0, paragraph: 1 });
+      Object.assign(item, shapeBounds(picture, parents), {
+        font_size: 0, asset, audit: false, previewable: asset.previewable,
+      });
+      blocks.push(item);
     }
     for (const relation of Object.values(relationships)) {
       if (!(relation.type || '').endsWith('/notesSlide') || !archive.has(relation.target)) continue;
@@ -788,11 +839,10 @@ async function parsePptx(bytes) {
   const content = [];
   for (const item of blocks) {
     const headerFooter = item.top <= 90 || item.top >= 590;
-    const repeated = !item.from_diagram && repeatedSlides.get(item.text).size >= 3
-      && !['heading', 'subtitle'].includes(item.kind)
+    const repeatable = !['heading', 'subtitle', 'image', 'table'].includes(item.kind);
+    const repeated = repeatable && !item.from_diagram && repeatedSlides.get(item.text).size >= 3
       && ((item.font_size > 0 && item.font_size <= 14) || headerFooter);
-    const smallNumber = smallPageNumber(item.text) && item.font_size > 0 && item.font_size <= 14
-      && !['heading', 'subtitle'].includes(item.kind);
+    const smallNumber = repeatable && smallPageNumber(item.text) && item.font_size > 0 && item.font_size <= 14;
     const peers = ordinalsBySlide.get(item.source.slide) || [];
     const ordinal = peers.includes(item) && (peers.length >= 2
       || peers.filter(peer => peer.text === item.text).length >= 2
@@ -811,6 +861,270 @@ async function parsePptx(bytes) {
     }
   }
   return [content, decorations, notes];
+}
+
+function colorChannels(value) {
+  if (!/^#[0-9a-f]{6}$/i.test(value || '')) return null;
+  return [1, 3, 5].map(offset => parseInt(value.slice(offset, offset + 2), 16));
+}
+
+function hexColor(channels) {
+  return `#${channels.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`.toUpperCase();
+}
+
+function transformedColor(value, node) {
+  const channels = colorChannels(value);
+  if (!channels) return null;
+  for (const modifier of childElements(node)) {
+    if (modifier.namespaceURI !== A) continue;
+    const amount = Number(modifier.getAttribute('val')) / 100000;
+    if (!Number.isFinite(amount)) continue;
+    if (modifier.localName === 'tint') {
+      for (let index = 0; index < 3; index += 1) channels[index] = channels[index] * amount + 255 * (1 - amount);
+    } else if (modifier.localName === 'shade') {
+      for (let index = 0; index < 3; index += 1) channels[index] *= amount;
+    } else if (modifier.localName === 'lumMod') {
+      for (let index = 0; index < 3; index += 1) channels[index] *= amount;
+    } else if (modifier.localName === 'lumOff') {
+      for (let index = 0; index < 3; index += 1) channels[index] += 255 * amount;
+    }
+  }
+  return hexColor(channels);
+}
+
+function colorFromNode(node, themeColors, colorMap) {
+  if (!node) return null;
+  const colorNode = childElements(node).find(element => element.namespaceURI === A
+    && ['srgbClr', 'schemeClr', 'sysClr'].includes(element.localName));
+  if (!colorNode) return null;
+  let value = null;
+  if (colorNode.localName === 'srgbClr') {
+    const rgb = colorNode.getAttribute('val') || '';
+    value = /^[0-9a-f]{6}$/i.test(rgb) ? `#${rgb.toUpperCase()}` : null;
+  } else if (colorNode.localName === 'sysClr') {
+    const rgb = colorNode.getAttribute('lastClr') || '';
+    value = /^[0-9a-f]{6}$/i.test(rgb) ? `#${rgb.toUpperCase()}` : null;
+  } else {
+    const name = colorNode.getAttribute('val') || '';
+    value = themeColors[colorMap[name] || name] || null;
+  }
+  return value ? transformedColor(value, colorNode) : null;
+}
+
+function safeTypeface(value) {
+  const font = String(value || '').replace(/[\x00-\x1f\x7f]/g, '').trim();
+  return font && !font.startsWith('+') ? font.slice(0, 120) : null;
+}
+
+function themeDetails(root) {
+  const colors = {};
+  const fonts = { title: null, body: null };
+  if (!root) return { colors, fonts };
+  const scheme = firstDescendant(root, A, 'clrScheme');
+  for (const entry of childElements(scheme)) {
+    const value = colorFromNode(entry, colors, {});
+    if (value) colors[entry.localName] = value;
+  }
+  for (const [name, key] of [['majorFont', 'title'], ['minorFont', 'body']]) {
+    const schemeFont = firstDescendant(root, A, name);
+    const eastAsian = firstDescendant(schemeFont, A, 'ea');
+    const latin = firstDescendant(schemeFont, A, 'latin');
+    fonts[key] = safeTypeface(eastAsian?.getAttribute('typeface'))
+      || safeTypeface(latin?.getAttribute('typeface'));
+  }
+  return { colors, fonts };
+}
+
+function masterColorMap(root) {
+  const result = { bg1: 'lt1', tx1: 'dk1', bg2: 'lt2', tx2: 'dk2' };
+  const map = childElements(root).find(element => matches(element, P, 'clrMap'));
+  for (const name of Object.keys(result)) {
+    const value = map?.getAttribute(name);
+    if (value) result[name] = value;
+  }
+  return result;
+}
+
+async function imageLuminance(asset) {
+  if (typeof createImageBitmap !== 'function' || typeof Blob === 'undefined') return null;
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(new Blob([asset.bytes]));
+    let canvas;
+    if (typeof OffscreenCanvas === 'function') {
+      canvas = new OffscreenCanvas(32, 18);
+    } else if (typeof document !== 'undefined') {
+      canvas = document.createElement('canvas');
+      canvas.width = 32;
+      canvas.height = 18;
+    } else {
+      return null;
+    }
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, 32, 18);
+    const pixels = context.getImageData(0, 0, 32, 18).data;
+    let total = 0;
+    let weight = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3] / 255;
+      total += (0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2]) / 255 * alpha;
+      weight += alpha;
+    }
+    return weight ? total / weight : null;
+  } catch {
+    return null;
+  } finally {
+    bitmap?.close();
+  }
+}
+
+async function templatePartBackground(archive, entry, pageSize, colors, colorMap, loadImage, warn) {
+  if (!entry) return { color: null, image: null };
+  const background = findPath(entry.root, [[P, 'cSld'], [P, 'bg']]);
+  const properties = findPath(background, [[P, 'bgPr']]);
+  let color = colorFromNode(findPath(properties, [[A, 'solidFill']]), colors, colorMap);
+  if (!color) color = colorFromNode(findPath(background, [[P, 'bgRef']]), colors, colorMap);
+  let image = null;
+  const backgroundBlip = firstDescendant(properties, A, 'blip');
+  if (backgroundBlip) image = await loadImage(entry, backgroundBlip);
+  if (findPath(properties, [[A, 'gradFill']]) || findPath(properties, [[A, 'pattFill']])) {
+    warn('模板的渐变或图案背景暂未支持，已回退为可用的纯色背景。');
+  }
+  if (!image) {
+    const pageWidth = pageSize.width / 9525;
+    const pageHeight = pageSize.height / 9525;
+    for (const picture of descendants(entry.root, P, 'pic')) {
+      const bounds = shapeBounds(picture);
+      const fullPage = bounds.left <= pageWidth * 0.03 && bounds.top <= pageHeight * 0.03
+        && bounds.left + bounds.width >= pageWidth * 0.97
+        && bounds.top + bounds.height >= pageHeight * 0.97;
+      if (!fullPage) continue;
+      const blip = firstDescendant(picture, A, 'blip');
+      if (blip) image = await loadImage(entry, blip);
+      if (image) break;
+    }
+  }
+  return { color, image };
+}
+
+export async function parseVisualTemplate(templateBytes) {
+  const archive = await readZip(templateBytes);
+  const slides = await presentationSlides(archive);
+  if (!slides.length) throw new Error('模板中没有可读取的幻灯片');
+  const warnings = [];
+  const warningSet = new Set();
+  const warn = message => {
+    if (warningSet.has(message)) return;
+    warningSet.add(message);
+    warnings.push(message);
+  };
+  const partCache = new Map();
+  const imageCache = new Map();
+  const themeCache = new Map();
+
+  async function loadPart(name) {
+    if (!name || !archive.has(name)) return null;
+    if (!partCache.has(name)) {
+      partCache.set(name, (async () => ({
+        part: name,
+        root: parseXml(await archive.text(name)),
+        relationships: await relationshipTargets(archive, name),
+      }))());
+    }
+    return partCache.get(name);
+  }
+
+  async function relatedPart(entry, relationshipName) {
+    if (!entry) return null;
+    const relation = Object.values(entry.relationships).find(item => item.type.endsWith(`/${relationshipName}`));
+    return relation ? loadPart(relation.target) : null;
+  }
+
+  async function loadTheme(entry) {
+    const relation = entry
+      ? Object.values(entry.relationships).find(item => item.type.endsWith('/theme'))
+      : null;
+    if (!relation || !archive.has(relation.target)) return { colors: {}, fonts: { title: null, body: null } };
+    if (!themeCache.has(relation.target)) {
+      themeCache.set(relation.target, (async () => themeDetails(parseXml(await archive.text(relation.target))))());
+    }
+    return themeCache.get(relation.target);
+  }
+
+  async function loadImage(entry, blip) {
+    const relation = entry.relationships[namespacedAttribute(blip, R, 'embed')];
+    if (!relation || !relation.type.endsWith('/image') || !archive.has(relation.target)) return null;
+    if (!imageCache.has(relation.target)) {
+      imageCache.set(relation.target, (async () => {
+        try {
+          const asset = makeAsset(pathBasename(relation.target), await archive.bytes(relation.target));
+          if (!['.png', '.jpg'].includes(asset.extension)) {
+            warn('模板背景仅支持 PNG/JPEG，其他图片格式已跳过。');
+            return null;
+          }
+          return { asset, luminance: await imageLuminance(asset) };
+        } catch {
+          warn('模板中有无法读取的背景图片，已跳过该图片。');
+          return null;
+        }
+      })());
+    }
+    return imageCache.get(relation.target);
+  }
+
+  const presentation = parseXml(await archive.text('ppt/presentation.xml'));
+  const size = findPath(presentation, [[P, 'sldSz']]);
+  const pageSize = {
+    width: integerValue(size?.getAttribute('cx'), 12192000),
+    height: integerValue(size?.getAttribute('cy'), 6858000),
+  };
+  if (Math.abs(pageSize.width / pageSize.height - 16 / 9) > 0.02) {
+    warn('模板不是 16:9；生成稿仍固定为 16:9，全页背景图会拉伸适配。');
+  }
+
+  async function resolveReference(slidePart) {
+    const slide = await loadPart(slidePart);
+    const layout = await relatedPart(slide, 'slideLayout');
+    const master = await relatedPart(layout, 'slideMaster');
+    const theme = await loadTheme(master);
+    if (!master) warn('未找到模板母版或主题，缺失的样式将回退到当前视觉风格。');
+    const colorMap = masterColorMap(master?.root);
+    const chain = [slide, layout, master];
+    const backgrounds = [];
+    for (const entry of chain) {
+      backgrounds.push(await templatePartBackground(
+        archive, entry, pageSize, theme.colors, colorMap, loadImage, warn,
+      ));
+    }
+    const selectedIndex = backgrounds.findIndex(item => item.color || item.image);
+    const selected = selectedIndex >= 0 ? backgrounds[selectedIndex] : { color: null, image: null };
+    const inherited = selectedIndex >= 0
+      ? backgrounds.slice(selectedIndex).find(item => item.color)?.color
+      : null;
+    const themeBackground = theme.colors[colorMap.bg1] || theme.colors.lt1 || null;
+    return {
+      background: selected.color || inherited || themeBackground,
+      image: selected.image?.asset || null,
+      imageLuminance: selected.image?.luminance ?? null,
+      colors: theme.colors,
+      fonts: theme.fonts,
+    };
+  }
+
+  const cover = await resolveReference(slides[0]);
+  const content = await resolveReference(slides[1] || slides[0]);
+  return {
+    cover,
+    content,
+    colors: cover.colors,
+    fonts: {
+      title: cover.fonts.title || content.fonts.title,
+      body: cover.fonts.body || content.fonts.body,
+    },
+    pageSize,
+    warnings,
+  };
 }
 
 function extensionOf(filename) {
@@ -848,6 +1162,37 @@ export async function parseDocument(filename, fileBytes, assets = []) {
   return { blocks, decorations, notes };
 }
 
+function pptxChapters(sections) {
+  const overview = sections.find(section => /^(?:内容结构|目录|大纲|CONTENTS)$/i.test(section.title));
+  const chapters = [];
+  if (overview) {
+    const items = overview.items.slice().sort((left, right) => left.top - right.top || left.left - right.left);
+    items.forEach((item, index) => {
+      if (!/^\d{1,2}$/.test(item.text)) return;
+      const titleItem = items.slice(index + 1).find(candidate => !/^\d{1,2}$/.test(candidate.text));
+      if (!titleItem) return;
+      chapters.push({ title: titleItem.text, number: Number(item.text), heading_id: titleItem.id, items: [] });
+    });
+  }
+  const contentSections = sections.filter(section => section !== overview);
+  contentSections.forEach(section => {
+    const match = section.title.match(/^\s*(\d{1,2})(?=[.\s、．]|$)/u);
+    if (match && !chapters.length) {
+      chapters.push({ title: section.title.replace(/^\s*\d{1,2}(?:\.\d+)*[.\s、．-]*/u, ''), number: Number(match[1]), heading_id: section.heading_id, items: [] });
+    }
+    const number = match ? Number(match[1]) : null;
+    let chapterIndex = number === null ? chapters.length - 1 : chapters.findIndex(chapter => chapter.number === number);
+    if (chapterIndex < 0 && number !== null) {
+      chapters.push({ title: section.title, number, heading_id: section.heading_id, items: [] });
+      chapterIndex = chapters.length - 1;
+    }
+    section.chapter_index = Math.max(0, chapterIndex);
+    section.chapter_title = chapters[section.chapter_index] ? chapters[section.chapter_index].title : section.title;
+    if (section.source_slide === null && section.items.length) section.source_slide = section.items[0].source.slide ?? null;
+  });
+  return chapters;
+}
+
 export function makeModel(filename, blocks, decorations = [], notes = []) {
   const headings = blocks.filter(item => item.kind === 'heading');
   const title = headings.length ? headings[0].text : pathStem(filename);
@@ -861,7 +1206,7 @@ export function makeModel(filename, blocks, decorations = [], notes = []) {
   for (const item of blocks) {
     if (item === titleItem) continue;
     if (item.kind === 'heading' && item.level <= sectionLevel) {
-      current = { title: item.text, heading_id: item.id, items: [] };
+      current = { title: item.text, heading_id: item.id, source_slide: item.source.slide ?? null, items: [] };
       sections.push(current);
     } else if (!current) {
       lead.push(item);
@@ -873,7 +1218,7 @@ export function makeModel(filename, blocks, decorations = [], notes = []) {
     sections.push({ title, heading_id: titleId, items: blocks.filter(item => item.id !== titleId) });
     lead.length = 0;
   }
-  return {
+  const model = {
     source: { filename, format: extensionOf(filename) },
     title,
     title_id: titleId,
@@ -883,4 +1228,6 @@ export function makeModel(filename, blocks, decorations = [], notes = []) {
     decorations: decorations || [],
     notes: notes || [],
   };
+  if (model.source.format === 'pptx') model.chapters = pptxChapters(sections);
+  return model;
 }

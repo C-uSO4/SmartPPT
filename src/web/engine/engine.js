@@ -1,6 +1,7 @@
-import { parseDocument, makeModel } from './parser.js';
+import { parseDocument, makeModel, parseVisualTemplate } from './parser.js';
 import { planPages } from './layout.js';
 import { renderPackage, verifyPackage, auditPackage } from './pptx.js';
+import { analyzeBlockRoles, applyBlockRoles } from './ai.js';
 
 const elapsed = started => (performance.now() - started) / 1000;
 let shellPromise;
@@ -36,7 +37,10 @@ function previewPages(pages) {
       elements: item.page.elements.map(element => {
         if (element.type !== 'image') return element;
         const { asset, ...preview } = element;
-        const extension = asset.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
+        if (asset.previewable === false || asset.extension === '.emf') {
+          return { ...preview, src: '', previewUnsupported: true, previewFormat: 'EMF' };
+        }
+        const extension = asset.extension === '.png' || asset.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
         return { ...preview, src: `data:image/${extension};base64,${base64(asset.bytes)}` };
       }),
     },
@@ -50,21 +54,52 @@ function publicBlocks(blocks) {
   });
 }
 
-export async function generateDeck({ filename, fileBytes, assets = [], style = 'paper' }, onProgress = () => {}) {
+export async function generateDeck({
+  filename, fileBytes, assets = [], style = 'paper', templateBytes = null, templateName = '', useAI = false,
+}, onProgress = () => {}) {
   onProgress('parsing');
+  let visualTemplate = null;
+  let templateSeconds = null;
+  if (templateBytes) {
+    const templateStarted = performance.now();
+    try {
+      visualTemplate = await parseVisualTemplate(templateBytes);
+    } catch (error) {
+      throw new Error(`模板读取失败：${error?.message || error}`);
+    }
+    templateSeconds = elapsed(templateStarted);
+  }
+
   const parseStarted = performance.now();
   const { blocks, decorations, notes } = await parseDocument(filename, fileBytes, assets);
-  const model = makeModel(filename, blocks, decorations, notes);
-  model.style = style;
   const parseSeconds = elapsed(parseStarted);
 
+  let ai = null;
+  let aiSeconds = null;
+  if (useAI) {
+    const aiStarted = performance.now();
+    try {
+      const analysis = await analyzeBlockRoles(blocks);
+      const changed = applyBlockRoles(blocks, analysis.roles);
+      ai = { requested: true, applied: true, changed, model: analysis.model, warning: '' };
+    } catch (error) {
+      ai = {
+        requested: true, applied: false, changed: 0, model: null,
+        warning: `${error?.message || error}；已回退到本地规则`,
+      };
+    }
+    aiSeconds = elapsed(aiStarted);
+  }
+
+  const model = makeModel(filename, blocks, decorations, notes);
+  model.style = style;
   const planStarted = performance.now();
-  const pages = planPages(model, style);
+  const pages = planPages(model, style, visualTemplate);
   const planSeconds = elapsed(planStarted);
   const job = { source: filename, page_count: pages.length, pages };
 
   const jsonStarted = performance.now();
-  JSON.stringify({ model, job });
+  JSON.stringify({ model, job }, (key, value) => key === 'bytes' && value instanceof Uint8Array ? value.byteLength : value);
   const planJsonWriteSeconds = elapsed(jsonStarted);
 
   onProgress('rendering');
@@ -87,6 +122,17 @@ export async function generateDeck({ filename, fileBytes, assets = [], style = '
     title: model.title,
     format: model.source.format,
     style,
+    ai,
+    template: visualTemplate ? {
+      applied: true,
+      name: templateName || '模板.pptx',
+      titleFont: visualTemplate.fonts.title,
+      bodyFont: visualTemplate.fonts.body,
+      coverBackground: visualTemplate.cover.image ? 'image' : 'color',
+      contentBackground: visualTemplate.content.image ? 'image' : 'color',
+      warnings: visualTemplate.warnings,
+      limitations: '不复制模板母版 Logo、装饰形状、原始版式与原始动画，也不生成可复用母版。',
+    } : null,
     noteCount: notes.length,
     pageCount: pages.length,
     blockCount: blocks.length,
@@ -96,14 +142,16 @@ export async function generateDeck({ filename, fileBytes, assets = [], style = '
     fidelity,
     timings: {
       parse_seconds: parseSeconds,
+      template_parse_seconds: templateSeconds,
+      ai_seconds: aiSeconds,
       plan_seconds: planSeconds,
       plan_json_write_seconds: planJsonWriteSeconds,
       write_seconds: writeSeconds,
       verify_seconds: verifySeconds,
       audit_seconds: auditSeconds,
-      plan_total_seconds: parseSeconds + planSeconds + planJsonWriteSeconds,
+      plan_total_seconds: parseSeconds + (templateSeconds || 0) + (aiSeconds || 0) + planSeconds + planJsonWriteSeconds,
       render_total_seconds: writeSeconds + verifySeconds,
-      total_seconds: parseSeconds + planSeconds + planJsonWriteSeconds + writeSeconds + verifySeconds + auditSeconds,
+      total_seconds: parseSeconds + (templateSeconds || 0) + (aiSeconds || 0) + planSeconds + planJsonWriteSeconds + writeSeconds + verifySeconds + auditSeconds,
     },
     downloadName: `${baseName}-智能美化.pptx`,
     morphCount: Math.max(0, pages.length - 1),

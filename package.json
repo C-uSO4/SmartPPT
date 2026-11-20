@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/web/server.js",
     "build": "node scripts/build-online.cjs",
-    "test": "node --test tests/web.test.cjs tests/online-static.test.cjs",
+    "test": "node --test tests/web.test.cjs tests/online-static.test.cjs tests/imported-pptx.test.cjs tests/ai-proxy.test.cjs",
     "test:core": "python -m unittest discover -s tests -p test_*.py"
   },
   "engines": {
