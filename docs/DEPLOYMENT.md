@@ -4,7 +4,9 @@
 
 访问者不需要 Python、Node 服务、数据库、对象存储或生成队列。静态服务器只提供网页、JavaScript、示例和 PPTX 基础包；默认情况下，访问者的文件在当前浏览器标签页内解析、生成和下载，不会上传到服务器。
 
-用户主动勾选“AI 辅助识别标题与正文”后，浏览器才会把待分类的 `id/kind/level/text` 文字块发送到本站 `/api/analyze`，再由服务端转发给 DeepSeek。图片、DOCX/PPTX 文件本体、生成后的 PPTX 和原文对账数据不进入该请求。模型只返回标题／正文角色与标题层级，浏览器不改写文字；AI 未配置、超时、限流或响应结构不合法时自动回退本地规则，生成流程继续。
+用户主动勾选“AI 辅助内容识别与生成配图”后，浏览器才会把待分类的 `id/kind/level/text` 文字块发送到本站 `/api/analyze`，再由服务端转发给 Kimi（配置时优先）或 DeepSeek。模型只返回 `heading/paragraph/note/instruction/image_prompt` 角色与标题层级，浏览器和服务端都禁止把备注、制作指令或配图需求反向改成页面内容，且不改写文字。
+
+大纲中的明确配图需求会单独发送到 `/api/image`，由服务端调用阿里云百炼万相异步文生图任务，下载并校验真实 PNG/JPEG 后返回。Kimi 只负责文本角色分析，不承担文生图。已有图片、DOCX/PPTX 文件本体、生成后的 PPTX 和原文对账数据不进入这两个请求。文本服务未配置、超时、限流或响应不合法时回退本地规则；图片服务失败时明确披露并继续生成无该配图的 PPT，不使用占位图冒充。
 
 开发机构建时使用已有 Node.js 18+：
 
@@ -23,25 +25,30 @@ node scripts/build-online.cjs
 
 ### Vercel 生产部署与 AI 代理
 
-生产入口：**https://smart-ppt-ten.vercel.app/**。Vercel 项目连接 GitHub 仓库 `C-uSO4/SmartPPT` 的 `main` 分支；推送后自动执行 `vercel.json` 中的 `node scripts/build-online.cjs`，静态输出为 `dist/`，同时把 `api/analyze.js` 部署为 Function。该配置固定为无框架 Node 静态构建，避免误用 Python preset。
+生产入口：**https://smart-ppt-ten.vercel.app/**。Vercel 项目连接 GitHub 仓库 `C-uSO4/SmartPPT` 的 `main` 分支；推送后自动执行 `vercel.json` 中的 `node scripts/build-online.cjs`，静态输出为 `dist/`，同时把 `api/analyze.js` 与 `api/image.js` 部署为独立 Function。该配置固定为无框架 Node 静态构建，避免误用 Python preset。
 
 在 Vercel 项目 **Settings → Environment Variables** 中配置：
 
 | 变量 | 必需 | 用途 |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 使用 AI 时必需 | 仅保存在服务端 Secret，不进入网页、构建产物或仓库 |
+| `MOONSHOT_API_KEY` | 使用 Kimi 文本分析时必需 | 仅用于 `/api/analyze`，配置后优先于 DeepSeek |
+| `KIMI_MODEL` | 否 | 覆盖 Kimi 文本模型名，默认 `kimi-k3` |
+| `DEEPSEEK_API_KEY` | 未配置 Kimi 且使用 DeepSeek 时必需 | 仅用于文本角色分析 |
 | `DEEPSEEK_MODEL` | 否 | 覆盖模型名，默认 `deepseek-flash` |
+| `DASHSCOPE_API_KEY` | 使用 AI 配图时必需 | 仅用于 `/api/image` 的百炼万相文生图 |
+| `DASHSCOPE_IMAGE_MODEL` | 否 | 覆盖图片模型名，默认 `wanx2.1-t2i-turbo` |
+| `DASHSCOPE_BASE_URL` | 否 | 覆盖百炼 API 根地址，默认 `https://dashscope.aliyuncs.com/api/v1` |
 | `ALLOWED_ORIGIN` | 否 | 额外允许的 Origin，多个值用英文逗号分隔；默认同源 |
 
-API Key 由项目所有者亲自在 Vercel 中填写，不要写入源码、GitHub、网页或聊天。环境变量只对后续部署生效，新增或修改后必须 **Redeploy**。可通过 `GET /api/analyze` 检查：`ok: true` 表示 Function 已部署，`configured: true` 才表示已读取 Secret；该健康检查不会返回 Key，也不代表真实付费模型请求已经成功。
+API Key 由项目所有者亲自在 Vercel 中填写，不要写入源码、GitHub、网页或聊天。文本和图片 Secret 相互独立，Kimi Key 不能用于生成图片。环境变量只对后续部署生效，新增或修改后必须 **Redeploy**。可分别通过 `GET /api/analyze` 与 `GET /api/image` 检查：`ok: true` 表示 Function 已部署，`configured: true` 才表示已读取对应 Secret；健康检查不会返回 Key，也不代表真实付费模型请求已经成功。
 
-代理限制单请求 400 块、60,000 字符、100 KB，上游超时 45 秒，浏览器超时 50 秒。跨站请求会被拒绝；当前每转发 IP 每分钟 6 次的限流只保存在单个 Function 实例内存中，是 best-effort 防护，不是分布式强限流或完整公网防滥用方案。公开使用仍需结合 Vercel Firewall、平台额度和 DeepSeek 费用控制。代理不记录正文日志，仅记录上游 HTTP 状态或响应结构校验错误。
+文本代理限制单请求 400 块、60,000 字符、100 KB，上游超时 45 秒，浏览器超时 50 秒。图片代理限制提示词 500 字符，单张图片最大 3,000,000 字节，只接受 HTTPS PNG/JPEG 结果，单次网页生成最多请求 4 张。跨站请求会被拒绝；文本每转发 IP 每分钟 6 次、图片每分钟 4 次的限流只保存在单个 Function 实例内存中，是 best-effort 防护，不是分布式强限流或完整公网防滥用方案。公开使用仍需结合 Vercel Firewall、平台额度及各模型费用控制。代理不记录正文或提示词日志，仅记录上游 HTTP 状态或响应结构校验错误。
 
-本地静态服务器不提供 `/api/analyze`；勾选 AI 后会显示错误并回退本地规则，这是预期行为。完整 AI 链路验收必须在 Vercel 地址进行：健康检查通过后，在网页勾选 AI、生成并检查角色调整数、原文对账与 `AI 结构分析` 实测耗时。未配置 Secret 或未完成真实模型请求时，不得宣称线上 AI 已验证可用。
+本地静态服务器不提供 `/api/analyze` 与 `/api/image`；勾选 AI 后会分别显示错误，文本回退本地规则、图片记为未生成，PPT 主流程继续，这是预期行为。完整 AI 链路验收必须在 Vercel 地址进行：两个健康检查通过后，在网页勾选 AI、生成并检查角色调整数、配图数量、原文对账及文本与图片实测耗时。未配置 Secret 或未完成真实模型请求时，不得宣称线上 Kimi 文本分析或百炼配图已验证可用。
 
 ### GitHub Pages 纯静态交付（2026-11-19）
 
-公开入口：**https://c-uso4.github.io/SmartPPT/**。仓库 `C-uSO4/SmartPPT` 为 Public，Pages 使用 `gh-pages` 分支的 `/ (root)`，无需账号即可访问。`main` 保存源码，`gh-pages` 只保存 `dist/` 的构建结果；更新公开网页时先重新构建，再分别提交并推送两个分支。GitHub Pages 不运行 `api/analyze.js`，因此只支持默认本地规则，不能提供云端 AI。
+公开入口：**https://c-uso4.github.io/SmartPPT/**。仓库 `C-uSO4/SmartPPT` 为 Public，Pages 使用 `gh-pages` 分支的 `/ (root)`，无需账号即可访问。`main` 保存源码，`gh-pages` 只保存 `dist/` 的构建结果；更新公开网页时先重新构建，再分别提交并推送两个分支。GitHub Pages 不运行 `api/analyze.js` 与 `api/image.js`，因此只支持默认本地规则，不能提供云端文本 AI 或 AI 配图。
 
 本次已在公开地址实际完成示例生成：6 页、18/18 条原文匹配，核心流程 66 ms，5 处平滑切换；页面无控制台错误，全部静态模块、示例和 PPTX 基础包均从 `/SmartPPT/` 子路径成功加载。下载 Blob 为 145,363 字节，独立 ZIP/XML 回读确认 31 个条目、6 页幻灯片、69 个原生文本块，CRC 与 XML 解析错误均为 0，并包含 5 页 Morph by Object 和 5 页非黑场 Fade。
 
@@ -85,4 +92,4 @@ python -m unittest discover -s tests -p "test_*.py"
 node --test tests/web.test.cjs tests/online-static.test.cjs tests/imported-pptx.test.cjs tests/ai-proxy.test.cjs
 ```
 
-本轮 19 项 JavaScript 测试全部通过，静态站点已重新构建。其中 AI 代理测试使用模拟上游，不读取 Secret、不发起真实模型计费请求。真实模板链路另在浏览器中完成页面克隆、原生图片与表格、原文对账及 OOXML 回读，并在本机 WPS 成功打开和导出 3 页纯文字稿与 2 页媒体稿；这些结果只代表当前测试文件，不等于所有模板或连续动画均已验收。发布后还应检查生产首页与 `GET /api/analyze`，在公开地址实际生成并下载 PPTX，再用 Python `zipfile` 独立回读，并在目标 WPS 版本中打开、导出和播放检查。配置 Secret 后，需重新部署并实际勾选 AI 完成一次生成，核对模型角色调整、100% 原文对账与 AI 实测耗时。静态构建、模拟测试或健康检查成功不等于真实 DeepSeek 请求、公开访问或 WPS 动画已经验收。
+本轮 30 项 JavaScript 测试全部通过，静态站点已重新构建。其中 AI 代理测试使用模拟 Kimi、DeepSeek 与百炼万相上游，不读取 Secret、不发起真实模型计费请求。真实模板链路另在浏览器中完成页面克隆、原生图片与表格、原文对账及 OOXML 回读，并在本机 WPS 成功打开和导出 3 页纯文字稿与 2 页媒体稿。本次新增 2 页角色与样式验证稿也完成浏览器、独立 ZIP/XML 和 WPS 逐页 PNG 实看，封面继承样式与双段正文格式均已核对；本地未配置 AI 时，文本与图片均明确回退且 PPT 主流程成功。这些结果只代表当前测试文件，不等于所有模板、真实云端模型或连续动画均已验收。发布后还应检查生产首页、`GET /api/analyze` 与 `GET /api/image`，在公开地址实际生成并下载 PPTX，再用 Python `zipfile` 独立回读，并在目标 WPS 版本中打开、导出和播放检查。配置 Secret 后，需重新部署并实际勾选 AI 完成一次生成，核对模型角色调整、真实配图、100% 原文对账与两类 AI 实测耗时。静态构建、模拟测试或健康检查成功不等于真实 Kimi／DeepSeek／百炼请求、公开访问或 WPS 动画已经验收。

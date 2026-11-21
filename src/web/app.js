@@ -156,7 +156,7 @@ async function generate() {
   setPipeline('parsing');
   $('generateButton').disabled = true;
   $('generateButton').classList.add('busy');
-  $('generateButton').querySelector('span').textContent = $('aiAssist').checked ? '正在进行 AI 分析…' : '正在浏览器内生成…';
+  $('generateButton').querySelector('span').textContent = $('aiAssist').checked ? '正在进行 AI 分析与配图…' : '正在浏览器内生成…';
   $('removeFile').disabled = true;
   $('assetInput').disabled = true;
   $('templateInput').disabled = true;
@@ -329,12 +329,23 @@ function renderResult(result, pptxBytes) {
     templateSummary.textContent = '';
   }
   const aiSummary = $('aiSummary');
-  aiSummary.classList.toggle('hidden', !result.ai);
-  aiSummary.textContent = result.ai
-    ? (result.ai.applied
-      ? `AI 结构分析已完成：调整 ${result.ai.changed} 个文字块；原文未改写${result.ai.model ? `；模型 ${result.ai.model}` : ''}。`
-      : `AI 未应用：${result.ai.warning}`)
-    : '';
+  const summaries = [];
+  if (result.noteCount || result.instructionCount) {
+    summaries.push(`已隔离 ${result.noteCount} 条备注、${result.instructionCount} 条制作指令，不进入幻灯片正文`);
+  }
+  if (result.ai) {
+    summaries.push(result.ai.applied
+      ? `AI 内容角色分析已完成：调整 ${result.ai.changed} 个文字块；原文未改写${result.ai.model ? `；模型 ${result.ai.model}` : ''}。`
+      : `AI 内容角色分析未应用：${result.ai.warning}`);
+  }
+  if (result.images?.requested) {
+    summaries.push(result.images.generated
+      ? `AI 配图已生成 ${result.images.generated} / ${result.images.requested} 张，均标为生成示意图${result.images.models.length ? `；模型 ${result.images.models.join('、')}` : ''}。`
+      : (result.images.warnings.join(' ') || '本次未生成 AI 配图。'));
+    if (result.images.generated && result.images.warnings.length) summaries.push(result.images.warnings.join(' '));
+  }
+  aiSummary.classList.toggle('hidden', !summaries.length);
+  aiSummary.textContent = summaries.join(' ');
   const ratio = result.fidelity.source_blocks ? result.fidelity.matched_blocks / result.fidelity.source_blocks : 0;
   $('metricFidelity').textContent = `${Math.round(ratio * 100)}%`;
   $('metricPages').textContent = result.pageCount;
@@ -384,7 +395,8 @@ function renderResult(result, pptxBytes) {
   const timings = [
     ['内容解析', result.timings.parse_seconds],
     ['模板解析', result.timings.template_parse_seconds],
-    ['AI 结构分析', result.timings.ai_seconds],
+    ['AI 内容角色分析', result.timings.ai_seconds],
+    ['AI 图片生成', result.timings.image_seconds],
     ['页面规划', result.timings.plan_seconds],
     ['计划 JSON 写出', result.timings.plan_json_write_seconds],
     ['PPTX 原生写入', result.timings.write_seconds],

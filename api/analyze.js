@@ -58,7 +58,9 @@ function validateBlocks(value) {
     const kind = String(item.kind || '');
     const text = String(item.text || '');
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) throw new Error('文字块 ID 不正确或重复');
-    if (!['heading', 'paragraph'].includes(kind)) throw new Error('包含不支持的文字块类型');
+    if (!['heading', 'paragraph', 'note', 'instruction', 'image_prompt'].includes(kind)) {
+      throw new Error('包含不支持的文字块类型');
+    }
     if (!text.trim() || text.length > 4000) throw new Error('文字块为空或单块过长');
     ids.add(id);
     totalCharacters += text.length;
@@ -75,8 +77,12 @@ function validateRoles(value, blocks) {
     const id = String(role?.id || '');
     const kind = String(role?.kind || '');
     const level = Number(role?.level);
-    if (!byId.has(id) || seen.has(id) || !['heading', 'paragraph'].includes(kind)) {
+    if (!byId.has(id) || seen.has(id) || !['heading', 'paragraph', 'note', 'instruction', 'image_prompt'].includes(kind)) {
       throw new Error('模型返回了无效角色');
+    }
+    const original = byId.get(id);
+    if (!['heading', 'paragraph'].includes(original.kind) && ['heading', 'paragraph'].includes(kind)) {
+      throw new Error('模型不能把备注或制作指令改为页面内容');
     }
     if (kind === 'heading' && (!Number.isInteger(level) || level < 1 || level > 4)) {
       throw new Error('模型返回了无效标题层级');
@@ -89,7 +95,9 @@ function validateRoles(value, blocks) {
 export default {
   async fetch(request) {
     if (request.method === 'GET') {
-      return json({ ok: true, provider: 'deepseek', configured: Boolean(process.env.DEEPSEEK_API_KEY) });
+      const provider = process.env.MOONSHOT_API_KEY ? 'kimi' : 'deepseek';
+      const configured = Boolean(process.env.MOONSHOT_API_KEY || process.env.DEEPSEEK_API_KEY);
+      return json({ ok: true, provider, configured });
     }
     if (request.method !== 'POST') return json({ error: '仅支持 POST 分析请求' }, 405);
     if (!allowedRequest(request)) return json({ error: '请求来源不受允许' }, 403);
@@ -109,13 +117,20 @@ export default {
       return json({ error: error instanceof SyntaxError ? '请求 JSON 格式不正确' : String(error.message || error) }, 400);
     }
 
-    const apiKey = process.env.DEEPSEEK_API_KEY;
+    const useKimi = Boolean(process.env.MOONSHOT_API_KEY);
+    const apiKey = useKimi ? process.env.MOONSHOT_API_KEY : process.env.DEEPSEEK_API_KEY;
     if (!apiKey) return json({ error: 'AI 服务尚未配置，请稍后再试或使用本地规则' }, 503);
 
-    const model = process.env.DEEPSEEK_MODEL || 'deepseek-flash';
+    const provider = useKimi ? 'Kimi' : 'DeepSeek';
+    const model = useKimi
+      ? process.env.KIMI_MODEL || 'kimi-k3'
+      : process.env.DEEPSEEK_MODEL || 'deepseek-flash';
+    const endpoint = useKimi
+      ? 'https://api.moonshot.cn/v1/chat/completions'
+      : 'https://api.deepseek.com/chat/completions';
     let providerResponse;
     try {
-      providerResponse = await fetch('https://api.deepseek.com/chat/completions', {
+      providerResponse = await fetch(endpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -126,7 +141,7 @@ export default {
           messages: [
             {
               role: 'system',
-              content: '你是演示文稿结构分类器。只判断给定文字块是 heading 还是 paragraph，不能改写、概括、增删文字。普通完整句子、解释、论证、带句号的文字默认是 paragraph；只有真正承担文档或章节标题功能的短文字才是 heading。现有 heading 也可纠正为 paragraph，现有 paragraph 只有在语义明确时才可提升为 heading。返回 JSON：{"roles":[{"id":"原 ID","kind":"heading|paragraph","level":1}]}。heading 的 level 只能为 1–4，文档主标题为 1、主要章节为 2、下级小节为 3–4；paragraph 的 level 为 0。不要返回 Markdown 代码围栏。',
+              content: '你是演示文稿内容角色分类器。逐块判断 kind，不能改写、概括、增删文字。heading 只用于真正承担文档或章节标题功能的短文字；paragraph 是应出现在页面上的完整句子、解释和论证；note 是演讲者讲稿、口头补充或不应出现在页面上的注释；instruction 是制作、排版、字体、颜色、模板、动画等要求；image_prompt 是配图、插图、背景图或 AI 绘图需求。普通完整句子和带逗号、句号的解释默认是 paragraph，不要仅因文字短就提升为 heading。已有 note、instruction、image_prompt 绝不能改为 heading 或 paragraph，只能在三种非页面角色之间纠正。返回 JSON：{"roles":[{"id":"原 ID","kind":"heading|paragraph|note|instruction|image_prompt","level":1}]}。heading 的 level 只能为 1–4，文档主标题为 1、主要章节为 2、下级小节为 3–4；其他角色的 level 为 0。不要返回 Markdown 代码围栏。',
             },
             { role: 'user', content: JSON.stringify({ blocks }) },
           ],
@@ -141,7 +156,7 @@ export default {
     }
 
     if (!providerResponse.ok) {
-      console.error('DeepSeek request failed', providerResponse.status);
+      console.error(`${provider} request failed`, providerResponse.status);
       return json({ error: 'AI 模型请求失败，请检查服务额度或稍后重试' }, 502);
     }
 
@@ -152,7 +167,7 @@ export default {
       const roles = validateRoles(JSON.parse(content), blocks);
       return json({ roles, model: providerData.model || model });
     } catch (error) {
-      console.error('DeepSeek response rejected', String(error.message || error));
+      console.error(`${provider} response rejected`, String(error.message || error));
       return json({ error: 'AI 返回结果未通过结构校验，已建议使用本地规则' }, 502);
     }
   },

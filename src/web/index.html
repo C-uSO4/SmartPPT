@@ -45,12 +45,12 @@
 
         <div class="engine-note">
           <span class="note-index">02</span>
-          <div class="engine-options"><h3>本次生成</h3><label for="styleSelect">视觉风格（未上传模板时使用）</label><select id="styleSelect"><option value="paper">纸感编辑</option><option value="midnight">深色发布会</option><option value="azure">清透商务</option></select><label class="ai-option" for="aiAssist"><input id="aiAssist" type="checkbox">AI 辅助识别标题与正文</label><p class="ai-privacy">可选。开启后，文字块会经本站云端代理发送至 DeepSeek；不会发送图片或文件本体。AI 失败时自动使用本地规则。</p><p>从全部模板页选择真实标题、正文、图片与表格槽位<br>保留母版与装饰 · 平滑切换 · 原文逐条回读</p></div>
+          <div class="engine-options"><h3>本次生成</h3><label for="styleSelect">视觉风格（未上传模板时使用）</label><select id="styleSelect"><option value="paper">纸感编辑</option><option value="midnight">深色发布会</option><option value="azure">清透商务</option></select><label class="ai-option" for="aiAssist"><input id="aiAssist" type="checkbox">AI 辅助内容识别与生成配图</label><p class="ai-privacy">可选。文字角色发送至 DeepSeek 或 Kimi；明确的配图需求发送至独立的阿里云百炼万相图片模型。不会发送已有图片或文件本体。文本分析失败时回退本地规则，图片服务未配置时会明确提示。</p><p>从全部模板页选择真实标题、正文、图片与表格槽位<br>保留母版与装饰 · 平滑切换 · 原文逐条回读</p></div>
         </div>
         <button id="generateButton" class="generate-button" type="button" disabled>
           <span>生成智能美化 PPT</span><span class="arrow">→</span>
         </button>
-        <p class="limit-note">默认情况下，文件只在当前浏览器标签页内解析和生成；只有主动开启 AI 时，待分类文字块才会发送到云端模型服务。内容 PPTX 保留原页文字、表格行列和 PNG/JPEG/EMF 图片，但不保留其原始模板与动画；上传独立模板后，会从全部模板页挑选真实版面，保留所选页的母版、版式、装饰与媒体并填入内容。网页预览显示这些装饰及 PNG/JPEG 图片，复杂效果、裁剪、旋转和其他图片格式以 WPS 中的下载稿为准；下载稿保留模板原始页面尺寸，模板原始动画会替换为当前效果，不生成可复用母版。字体缺失时由 WPS 替换。</p>
+        <p class="limit-note">默认情况下，文件只在当前浏览器标签页内解析和生成；只有主动开启 AI 时，待分类文字块和明确的配图提示才会分别发送到云端文本与图片模型服务。内容 PPTX 保留原页文字、表格行列和 PNG/JPEG/EMF 图片，但不保留其原始模板与动画；上传独立模板后，会从全部模板页挑选真实版面，保留所选页的母版、版式、装饰与媒体并填入内容。网页预览显示这些装饰及 PNG/JPEG 图片，复杂效果、裁剪、旋转和其他图片格式以 WPS 中的下载稿为准；下载稿保留模板原始页面尺寸，模板原始动画会替换为当前效果，不生成可复用母版。字体缺失时由 WPS 替换。</p>
 
         <ol id="pipeline" class="pipeline hidden">
           <li data-stage="parsing"><span></span><div>理解内容<small>标题、层级、数字与来源</small></div></li>

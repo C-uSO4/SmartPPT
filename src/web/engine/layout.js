@@ -769,7 +769,7 @@ function templatePlanItems(plan, model) {
 function templateTextGroups(items, slots) {
   if (!items.length) return [];
   if (!slots.length) return null;
-  const groups = items.map(item => ({ ...item, kind: 'text' }));
+  const groups = items.map(item => ({ ...item, sourceKind: item.kind, kind: 'text' }));
   while (groups.length > slots.length) {
     let bestIndex = 0;
     let bestLength = Infinity;
@@ -782,6 +782,8 @@ function templateTextGroups(items, slots) {
     }
     const merged = {
       ...groups[bestIndex],
+      sourceKind: groups[bestIndex].sourceKind === groups[bestIndex + 1].sourceKind
+        ? groups[bestIndex].sourceKind : 'mixed',
       text: `${groups[bestIndex].text}\n${groups[bestIndex + 1].text}`,
     };
     groups.splice(bestIndex, 2, merged);
@@ -811,18 +813,27 @@ function templateAssignment(candidate, items) {
   if (groups === null) return null;
   groups.forEach((item, index) => assignments.push({ ...item, slot: bodySlots[index], slotKind: 'body' }));
   let shrinkPenalty = 0;
+  let rolePenalty = 0;
   for (const assignment of assignments) {
     if (assignment.kind !== 'text') continue;
+    const originalSize = assignment.slot.fontSize || 18;
+    const minimum = Math.max(10, Math.min(16, originalSize * 0.8));
     const size = fitFontSize(assignment.text, assignment.slot.width * 0.9, assignment.slot.height * 0.9,
-      Math.min(28, assignment.slot.fontSize || 18), 10, BODY_LINE_SPACING);
+      originalSize, minimum, BODY_LINE_SPACING);
+    const lineHeight = size * 96 / 72 * BODY_LINE_SPACING / 100;
+    if (estimatedLines(assignment.text, assignment.slot.width * 0.9, size) * lineHeight > assignment.slot.height * 0.9) {
+      return null;
+    }
     assignment.fontSize = size;
-    shrinkPenalty += Math.max(0, Math.min(28, assignment.slot.fontSize || 18) - size);
+    shrinkPenalty += Math.max(0, originalSize - size);
+    if (assignment.sourceKind === 'paragraph' && assignment.slot.textRole === 'label') rolePenalty += 8;
+    if (assignment.sourceKind === 'heading' && assignment.slot.textRole === 'label') rolePenalty -= 1;
   }
   const titleAssignment = { kind: 'title', text: '', slot: candidate.title, slotKind: 'title' };
 
   const usedSlotIds = new Set(assignments.map(item => item.slot.id));
   const clearShapeIds = candidate.contentTextIds.filter(id => !usedSlotIds.has(id));
-  const score = shrinkPenalty * 3 + Math.max(0, bodySlots.length - groups.length) * 0.2;
+  const score = shrinkPenalty * 3 + rolePenalty + Math.max(0, bodySlots.length - groups.length) * 0.2;
   return { candidate, titleAssignment, assignments, clearShapeIds, score };
 }
 
@@ -835,15 +846,20 @@ function selectTemplateAssignment(plan, items, visualTemplate) {
   for (const candidate of ordered) {
     const assignment = templateAssignment(candidate, items);
     if (!assignment) continue;
+    const titleSize = candidate.title.fontSize || 32;
+    const minimum = Math.max(12, titleSize * 0.75);
+    assignment.titleAssignment.text = plan.title;
+    assignment.titleAssignment.fontSize = fitFontSize(plan.title, candidate.title.width * 0.9,
+      candidate.title.height * 0.9, titleSize, minimum, 110);
+    const titleLineHeight = assignment.titleAssignment.fontSize * 96 / 72 * 1.1;
+    if (estimatedLines(plan.title, candidate.title.width * 0.9, assignment.titleAssignment.fontSize) * titleLineHeight
+      > candidate.title.height * 0.9) continue;
     assignment.score += plan.kind === 'cover' ? Math.max(0, candidate.slideNumber - 1) * 8 : (candidate.slideNumber === 1 ? 8 : 0);
     if (!best || assignment.score < best.score) best = assignment;
   }
   if (!best) {
     throw new Error(`模板没有能容纳“${plan.title}”的真实标题与正文区域，请使用包含合适内容版面的 PPT 模板`);
   }
-  best.titleAssignment.text = plan.title;
-  best.titleAssignment.fontSize = fitFontSize(plan.title, best.titleAssignment.slot.width * 0.9,
-    best.titleAssignment.slot.height * 0.9, best.titleAssignment.slot.fontSize || 32, 12, 110);
   return best;
 }
 
@@ -872,10 +888,13 @@ function templatePreviewPage(selection, visualPage) {
       continue;
     }
     fade.push(elements.length);
-    elements.push(text(slot.left, slot.top, slot.width, slot.height, assignment.text,
-      assignment.fontSize || slot.fontSize || 18, THEME.ink, assignment.kind === 'title', 'left', 10,
+    const element = text(slot.left, slot.top, slot.width, slot.height, assignment.text,
+      assignment.fontSize || slot.fontSize || 18, slot.color || THEME.ink,
+      slot.bold ?? assignment.kind === 'title', slot.align || 'left', 10,
       assignment.kind === 'title' ? 110 : BODY_LINE_SPACING, 1,
-      assignment.kind === 'title' ? TITLE_FONT : FONT));
+      slot.font || (assignment.kind === 'title' ? TITLE_FONT : FONT));
+    element.valign = slot.valign || 'top';
+    elements.push(element);
   }
   return [{ background: THEME.background, elements, templatePreview: true }, fade];
 }

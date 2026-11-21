@@ -106,9 +106,39 @@ export function markdownInlineText(value) {
   return clean(output);
 }
 
-function explicitNote(text) {
-  const match = String(text).match(/^(?:备注|讲稿|演讲备注|注释|notes?)\s*[:：]\s*(.*)$/i);
-  return match ? match[1] : null;
+const DIRECTIVE_KINDS = new Set(['note', 'instruction', 'image_prompt']);
+
+function explicitDirective(text) {
+  const match = String(text).match(/^(备注|讲稿|演讲备注|注释|notes?|制作要求|页面要求|排版要求|设计要求|PPT\s*要求|模板要求|动画要求|instructions?|配图|配图要求|配图提示|图片要求|图片提示|插图要求|背景图要求|视觉建议|image[_ -]?prompts?)\s*[:：]\s*(.*)$/i);
+  if (!match) return null;
+  const label = match[1].toLowerCase().replace(/\s+/g, '');
+  const kind = /^(?:备注|讲稿|演讲备注|注释|note|notes)$/.test(label) ? 'note'
+    : /^(?:配图|配图要求|配图提示|图片要求|图片提示|插图要求|背景图要求|视觉建议|image_prompt|image-prompt|imageprompt|image_prompts|image-prompts|imageprompts)$/.test(label) ? 'image_prompt'
+      : 'instruction';
+  return { kind, text: match[2] };
+}
+
+function implicitDirective(text) {
+  const value = clean(String(text).replace(/^>\s*/, ''));
+  if (!value || /[。！？；!?;]$/.test(value)) return null;
+  const commanded = /^(?:请|建议|需要|应当|应该|本页|此页|该页|这一页|下一页|页面|幻灯片|ppt)/i.test(value);
+  if (!commanded) return null;
+  const imageRequest = /(?:配图|插图|背景图|封面图|图片|图像|画面|绘图)/i.test(value)
+    && /(?:生成|绘制|创作|补充|添加|插入|使用|采用|需要|建议|配图|插图)/.test(value);
+  if (imageRequest) return { kind: 'image_prompt', text: value };
+  const layoutRequest = /(?:排版|版式|布局|字体|字号|字色|颜色|对齐|行距|段距|模板|动画|切换|入场|美化|设计成|制作成)/.test(value);
+  return layoutRequest ? { kind: 'instruction', text: value } : null;
+}
+
+function directive(text) {
+  return explicitDirective(text) || implicitDirective(text);
+}
+
+function directiveFenceKind(value) {
+  const label = String(value).toLowerCase().replace(/\s+/g, '');
+  if (/^(?:note|notes|备注)$/.test(label)) return 'note';
+  if (/^(?:配图|配图提示|图片提示|image_prompt|image-prompt|imageprompt|image_prompts|image-prompts|imageprompts)$/.test(label)) return 'image_prompt';
+  return 'instruction';
 }
 
 function childElements(node) {
@@ -363,10 +393,12 @@ function parseMarkdown(filename, bytes, assets) {
   let paragraphStart = 1;
   let inCode = false;
   let inNotes = false;
+  let noteKind = 'note';
   let noteStart = 0;
   let inComment = false;
+  let commentKind = 'note';
   let commentStart = 0;
-  let inExplicitNotes = false;
+  let explicitKind = null;
   let inFormula = false;
   let formulaLines = [];
   let formulaStart = 0;
@@ -411,7 +443,7 @@ function parseMarkdown(filename, bytes, assets) {
         inNotes = false;
       } else if (text) {
         const value = markdownInlineText(text.replace(/^>\s*/, ''));
-        if (value) blocks.push(block('note', value, { line: number }));
+        if (value) blocks.push(block(noteKind, value, { line: number }));
       }
       index += 1;
       continue;
@@ -419,28 +451,30 @@ function parseMarkdown(filename, bytes, assets) {
     if (inComment) {
       const end = text.indexOf('-->');
       const value = markdownInlineText(end >= 0 ? text.slice(0, end) : text);
-      if (value) blocks.push(block('note', value, { line: number }));
+      if (value) blocks.push(block(commentKind, value, { line: number }));
       if (end >= 0) inComment = false;
       index += 1;
       continue;
     }
-    if (inExplicitNotes) {
+    if (explicitKind) {
       if (!text) {
-        inExplicitNotes = false;
+        explicitKind = null;
         index += 1;
         continue;
       }
       if (!/^(?:#{1,6})(?:\s+|(?=[\u4e00-\u9fff]))/u.test(text)) {
         const value = markdownInlineText(text.replace(/^>\s*/, ''));
-        if (value) blocks.push(block('note', value, { line: number }));
+        if (value) blocks.push(block(explicitKind, value, { line: number }));
         index += 1;
         continue;
       }
-      inExplicitNotes = false;
+      explicitKind = null;
     }
-    if (/^:::\s*(?:notes?|备注)\s*$/i.test(text)) {
+    const directiveFence = text.match(/^:::\s*(notes?|备注|instructions?|制作要求|页面要求|排版要求|设计要求|模板要求|动画要求|配图|配图提示|图片提示|image[_ -]?prompts?)\s*$/i);
+    if (directiveFence) {
       flushParagraph();
       inNotes = true;
+      noteKind = directiveFenceKind(directiveFence[1]);
       noteStart = number;
       index += 1;
       continue;
@@ -454,7 +488,9 @@ function parseMarkdown(filename, bytes, assets) {
     const comment = text.match(/^<!--\s*(.*?)\s*-->$/);
     if (comment) {
       flushParagraph();
-      if (comment[1]) blocks.push(block('note', markdownInlineText(comment[1]), source));
+      const value = markdownInlineText(comment[1]);
+      const classified = directive(value);
+      if (value) blocks.push(block(classified?.kind || 'note', classified?.text || value, source));
       index += 1;
       continue;
     }
@@ -463,18 +499,20 @@ function parseMarkdown(filename, bytes, assets) {
       inComment = true;
       commentStart = number;
       const value = markdownInlineText(text.slice(4));
-      if (value) blocks.push(block('note', value, source));
+      const classified = directive(value);
+      commentKind = classified?.kind || 'note';
+      if (value) blocks.push(block(commentKind, classified?.text || value, source));
       index += 1;
       continue;
     }
     const quoted = text.match(/^>\s*(.*)$/);
     if (quoted) text = quoted[1];
-    const note = explicitNote(text);
-    if (note !== null) {
+    const classified = directive(text);
+    if (classified) {
       flushParagraph();
-      const value = markdownInlineText(note);
-      if (value) blocks.push(block('note', value, source));
-      inExplicitNotes = true;
+      const value = markdownInlineText(classified.text);
+      if (value) blocks.push(block(classified.kind, value, source));
+      explicitKind = explicitDirective(text) ? classified.kind : null;
       index += 1;
       continue;
     }
@@ -535,7 +573,7 @@ function parseMarkdown(filename, bytes, assets) {
   }
   flushParagraph();
   if (inFormula) throw new Error(`第 ${formulaStart} 行公式缺少结束标记 $$`);
-  if (inNotes) throw new Error(`第 ${noteStart} 行备注块缺少结束标记 :::`);
+  if (inNotes) throw new Error(`第 ${noteStart} 行${noteKind === 'note' ? '备注' : '指令'}块缺少结束标记 :::`);
   if (inComment) throw new Error(`第 ${commentStart} 行注释块缺少结束标记 -->`);
   return blocks;
 }
@@ -593,10 +631,10 @@ function parseText(bytes) {
       return;
     }
     const source = { line: number };
-    const note = explicitNote(text);
-    if (note !== null) {
+    const classified = directive(text);
+    if (classified) {
       flushParagraph();
-      blocks.push(block('note', note, source));
+      if (classified.text) blocks.push(block(classified.kind, classified.text, source));
       return;
     }
     const level = textHeadingLevel(text, numericSections);
@@ -656,9 +694,10 @@ async function parseDocx(bytes) {
     const outline = findPath(paragraph, [[W, 'pPr'], [W, 'outlineLvl']]);
     const outlineLevel = outline ? integerValue(namespacedAttribute(outline, W, 'val')) + 1 : null;
     const source = { paragraph: number, style: styleId };
-    const note = explicitNote(text);
-    if (note !== null || /备注|讲稿|comment|notes?/i.test(styleName)) {
-      blocks.push(block('note', note !== null ? note : text, source));
+    const classified = directive(text);
+    if (classified || /备注|讲稿|comment|notes?/i.test(styleName)) {
+      const kind = /备注|讲稿|comment|notes?/i.test(styleName) ? 'note' : classified.kind;
+      blocks.push(block(kind, classified?.text || text, source));
     } else if (isFormula) {
       blocks.push(block('formula', text, source));
     } else if (['title', '标题'].includes(styleName)) {
@@ -1157,13 +1196,38 @@ function templateTextDetails(shape, colors, colorMap) {
   const anchors = { ctr: 'mid', b: 'bottom' };
   return {
     text: shapeText(shape).join('\n'),
-    fontSize: shapeFontSize(shape) || 16,
+    fontSize: integerValue(runProperties?.getAttribute('sz')) / 100 || shapeFontSize(shape),
     color,
-    bold: runProperties?.getAttribute('b') === '1',
-    align: alignments[paragraphProperties?.getAttribute('algn')] || 'left',
-    valign: anchors[bodyProperties?.getAttribute('anchor')] || 'top',
+    bold: runProperties?.hasAttribute('b') ? runProperties.getAttribute('b') === '1' : null,
+    align: alignments[paragraphProperties?.getAttribute('algn')] || null,
+    valign: anchors[bodyProperties?.getAttribute('anchor')] || null,
     font,
   };
+}
+
+function inheritedTemplateTextDetails(shape, chain, colors, colorMap) {
+  const direct = templateTextDetails(shape, colors, colorMap);
+  const placeholder = findPath(shape, [[P, 'nvSpPr'], [P, 'nvPr'], [P, 'ph']]);
+  if (!placeholder) return direct;
+  const type = placeholder.getAttribute('type') || 'body';
+  const index = placeholder.getAttribute('idx');
+  const inherited = [];
+  for (const entry of chain.slice(1)) {
+    if (!entry) continue;
+    const match = descendants(entry.root, P, 'sp').find(candidate => {
+      const ph = findPath(candidate, [[P, 'nvSpPr'], [P, 'nvPr'], [P, 'ph']]);
+      if (!ph || (ph.getAttribute('type') || 'body') !== type) return false;
+      return index === null || ph.getAttribute('idx') === index;
+    });
+    if (match) inherited.push(templateTextDetails(match, colors, colorMap));
+  }
+  const merged = { ...direct };
+  for (const key of ['fontSize', 'color', 'bold', 'align', 'valign', 'font']) {
+    if (merged[key] !== null && merged[key] !== 0 && merged[key] !== undefined) continue;
+    const source = inherited.find(details => details[key] !== null && details[key] !== 0 && details[key] !== undefined);
+    if (source) merged[key] = source[key];
+  }
+  return merged;
 }
 
 function templateShapeStyle(shape, colors, colorMap) {
@@ -1357,11 +1421,11 @@ export async function parseVisualTemplate(templateBytes) {
       if (!details.text) continue;
       elements.push({
         ...base, type: 'text', x: bounds.left, y: bounds.top, w: bounds.width, h: bounds.height,
-        valign: details.valign,
+        valign: details.valign || 'top',
         paragraphs: details.text.split('\n').map(value => ({
-          align: details.align, lineSpacingPct: 110, spaceAfterPt: 0, bullet: false,
+          align: details.align || 'left', lineSpacingPct: 110, spaceAfterPt: 0, bullet: false,
           runs: [{
-            text: value, sizePt: details.fontSize, bold: details.bold, italic: false,
+            text: value, sizePt: details.fontSize || 16, bold: details.bold || false, italic: false,
             color: details.color || reference.colors[colorMap.tx1] || reference.colors.dk1 || '#142B33',
             font: details.font || reference.fonts.body || 'Microsoft YaHei',
           }],
@@ -1385,13 +1449,24 @@ export async function parseVisualTemplate(templateBytes) {
       const id = properties?.getAttribute('id') || '';
       if (!id) return null;
       const bounds = shapeBounds(shape, parents);
-      const fontSize = shapeFontSize(shape) || (kind === 'title' ? 32 : 18);
+      const details = ['title', 'body'].includes(kind)
+        ? inheritedTemplateTextDetails(shape, resolved.chain, resolved.reference.colors, resolved.colorMap)
+        : null;
+      const fontSize = details?.fontSize || (kind === 'title' ? 32 : 18);
       const lineCapacity = Math.max(1, Math.floor(bounds.height / Math.max(18, fontSize * 96 / 72 * 1.3)));
       const characterCapacity = Math.max(4, Math.floor(bounds.width / Math.max(8, fontSize * 96 / 72)));
+      const text = clean(shapeText(shape).join(' '));
+      const placeholder = placeholderType(shape);
+      const textRole = kind === 'body' && !placeholder && text && codePointLength(text) <= 40
+        && (fontSize >= 22 || bounds.height <= 72) ? 'label' : kind;
       return {
-        id, kind, ...bounds, fontSize,
+        id, kind, ...bounds, fontSize, text, textRole,
+        color: details?.color || null,
+        bold: details?.bold ?? null,
+        align: details?.align || null,
+        valign: details?.valign || null,
+        font: details?.font || null,
         capacity: Math.max(8, lineCapacity * characterCapacity),
-        text: clean(shapeText(shape).join(' ')),
       };
     };
     const textShapes = descendants(entry.root, P, 'sp').filter(shape => findPath(shape, [[P, 'txBody']]));
@@ -1469,33 +1544,48 @@ function extensionOf(filename) {
   return dot < 0 ? '' : base.slice(dot + 1).toLowerCase();
 }
 
+export function partitionBlockRoles(roleBlocks) {
+  const blocks = [];
+  const notes = [];
+  const instructions = [];
+  const imagePrompts = [];
+  for (const item of roleBlocks) {
+    if (item.kind === 'note') notes.push(item);
+    else if (item.kind === 'instruction') instructions.push(item);
+    else if (item.kind === 'image_prompt') imagePrompts.push(item);
+    else blocks.push(item);
+  }
+  return { blocks, notes, instructions, imagePrompts };
+}
+
+export function createImageAsset(name, bytes) {
+  return makeAsset(name, bytes);
+}
+
 export async function parseDocument(filename, fileBytes, assets = []) {
   const extension = extensionOf(filename);
-  let blocks;
+  let content;
   let decorations = [];
-  let notes = [];
+  let speakerNotes = [];
   if (['md', 'markdown'].includes(extension)) {
-    blocks = parseMarkdown(filename, fileBytes, assets);
+    content = parseMarkdown(filename, fileBytes, assets);
   } else if (extension === 'txt') {
-    blocks = parseText(fileBytes);
+    content = parseText(fileBytes);
   } else if (extension === 'docx') {
-    blocks = await parseDocx(fileBytes);
+    content = await parseDocx(fileBytes);
   } else if (extension === 'pptx') {
-    [blocks, decorations, notes] = await parsePptx(fileBytes);
+    [content, decorations, speakerNotes] = await parsePptx(fileBytes);
   } else {
     throw new Error('仅支持 .docx、.md、.markdown、.txt、.pptx');
   }
-  notes.push(...blocks.filter(item => item.kind === 'note'));
-  blocks = blocks.filter(item => item.kind !== 'note');
-  if (!blocks.length) throw new Error('输入中没有可识别的正文');
-  blocks.forEach((item, index) => {
+  const roleBlocks = content.concat(speakerNotes);
+  roleBlocks.forEach((item, index) => {
     item.id = `b${String(index + 1).padStart(4, '0')}`;
     item.numbers = item.text.match(/(?<![A-Za-z])[-+]?\d+(?:\.\d+)?%?/g) || [];
   });
-  notes.forEach((item, index) => {
-    item.id = `n${String(index + 1).padStart(4, '0')}`;
-  });
-  return { blocks, decorations, notes };
+  const partitioned = partitionBlockRoles(roleBlocks);
+  if (!partitioned.blocks.length) throw new Error('输入中没有可识别的正文');
+  return { ...partitioned, decorations, roleBlocks };
 }
 
 function pptxChapters(sections) {
@@ -1529,7 +1619,7 @@ function pptxChapters(sections) {
   return chapters;
 }
 
-export function makeModel(filename, blocks, decorations = [], notes = []) {
+export function makeModel(filename, blocks, decorations = [], notes = [], instructions = [], imagePrompts = []) {
   const format = extensionOf(filename);
   const headings = blocks.filter(item => item.kind === 'heading');
   const sections = [];
@@ -1593,6 +1683,8 @@ export function makeModel(filename, blocks, decorations = [], notes = []) {
     blocks,
     decorations: decorations || [],
     notes: notes || [],
+    instructions: instructions || [],
+    image_prompts: imagePrompts || [],
   };
   if (format === 'pptx') model.chapters = pptxChapters(sections);
   return model;

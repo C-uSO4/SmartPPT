@@ -320,3 +320,92 @@ test('模板内容分配到真实页面槽位且保留背景预览', async () =>
   assert.ok(pages.every(page => page.fade.every(index => Number.isInteger(index)
     && index >= 0 && index < page.page.elements.length)));
 });
+
+test('Markdown 隔离显式与自由格式备注、制作指令和配图需求', async () => {
+  const { parser } = await loadModules();
+  const source = [
+    '# 研究汇报',
+    '封面正文保留。',
+    '备注：开场先说明研究背景',
+    '这一句也只口述，不上屏',
+    '',
+    '制作要求：标题居中并保留模板字色',
+    '正文使用 1.3 倍行距',
+    '',
+    '## 第一章',
+    '这一完整段落是页面正文，不能因为 AI 或模板槽位变成小标题。',
+    '请为本页生成一张蓝色实验室场景配图',
+    '',
+    '::: 配图',
+    '画面包含离子通道结构，不出现文字',
+    ':::',
+    '',
+    '<!-- 排版要求：本页保留原有对齐方式 -->',
+  ].join('\n');
+  const parsed = await parser.parseDocument('roles.md', new TextEncoder().encode(source));
+  assert.deepEqual(parsed.blocks.map(item => item.text), [
+    '研究汇报', '封面正文保留。', '第一章', '这一完整段落是页面正文，不能因为 AI 或模板槽位变成小标题。',
+  ]);
+  assert.deepEqual(parsed.notes.map(item => item.text), ['开场先说明研究背景', '这一句也只口述，不上屏']);
+  assert.deepEqual(parsed.instructions.map(item => item.text), [
+    '标题居中并保留模板字色', '正文使用 1.3 倍行距', '本页保留原有对齐方式',
+  ]);
+  assert.deepEqual(parsed.imagePrompts.map(item => item.text), [
+    '请为本页生成一张蓝色实验室场景配图', '画面包含离子通道结构，不出现文字',
+  ]);
+  assert.equal(parsed.roleBlocks.length, 11);
+  const model = parser.makeModel('roles.md', parsed.blocks, [], parsed.notes, parsed.instructions, parsed.imagePrompts);
+  assert.equal(model.notes.length, 2);
+  assert.equal(model.instructions.length, 3);
+  assert.equal(model.image_prompts.length, 2);
+  assert.equal(model.sections[0].items.length, 1);
+});
+
+test('模板优先把完整正文放入正文槽并保留槽位字符与段落样式', async () => {
+  const { parser, layout } = await loadModules();
+  const blocks = [
+    { id: 'b0001', kind: 'heading', text: '模板测试', level: 1, source: { line: 1 }, numbers: [] },
+    { id: 'b0002', kind: 'heading', text: '研究内容', level: 2, source: { line: 3 }, numbers: [] },
+    { id: 'b0003', kind: 'paragraph', text: '这是需要完整保留的正文，不应该被塞入短标签。', level: 0, source: { line: 4 }, numbers: [] },
+  ];
+  const visual = background => ({
+    background, image: null, imageLuminance: null,
+    colors: { lt1: '#FFFFFF', dk1: '#102A43', accent1: '#FF6600', accent2: '#00A389' },
+    decorations: [],
+  });
+  const title = id => ({
+    id, kind: 'title', left: 70, top: 50, width: 1000, height: 80, fontSize: 34,
+    text: '标题示例', color: '#ABCDEF', bold: true, align: 'center', valign: 'mid', font: 'Template Title',
+  });
+  const candidate = (slideNumber, slot) => ({
+    slidePart: `ppt/slides/slide${slideNumber}.xml`, slideNumber,
+    title: title(String(slideNumber * 10)), bodySlots: [slot], pictureSlots: [], tableSlots: [],
+    contentTextIds: [slot.id], visual: visual(slideNumber === 1 ? '#101820' : '#F4F1E8'),
+  });
+  const visualTemplate = {
+    fonts: { title: 'Template Title', body: 'Template Body' }, colors: {},
+    cover: visual('#101820'), content: visual('#F4F1E8'),
+    candidates: [
+      candidate(1, { id: '2', kind: 'body', left: 100, top: 260, width: 800, height: 180, fontSize: 20, text: '封面正文' }),
+      candidate(2, { id: '12', kind: 'body', textRole: 'label', left: 80, top: 180, width: 900, height: 180, fontSize: 24, text: '短标签' }),
+      candidate(3, {
+        id: '13', kind: 'body', textRole: 'body', left: 80, top: 180, width: 900, height: 180, fontSize: 24,
+        text: '正文示例', color: '#112233', bold: false, align: 'right', valign: 'mid', font: 'Template Body',
+      }),
+    ],
+  };
+  const pages = layout.planPages(parser.makeModel('outline.md', blocks), 'paper', visualTemplate);
+  assert.equal(pages[1].plan.template.slidePart, 'ppt/slides/slide3.xml');
+  assert.equal(pages[1].plan.template.assignments[0].slot.id, '13');
+  assert.equal(pages[1].plan.template.assignments[0].sourceKind, 'paragraph');
+  const titleElement = pages[1].page.elements.find(element => element.paragraphs?.[0]?.runs?.[0]?.text === '研究内容');
+  const bodyElement = pages[1].page.elements.find(element => element.paragraphs?.[0]?.runs?.[0]?.text.includes('需要完整保留'));
+  assert.equal(titleElement.paragraphs[0].align, 'center');
+  assert.equal(titleElement.paragraphs[0].runs[0].color, '#ABCDEF');
+  assert.equal(titleElement.paragraphs[0].runs[0].font, 'Template Title');
+  assert.equal(bodyElement.paragraphs[0].align, 'right');
+  assert.equal(bodyElement.paragraphs[0].runs[0].color, '#112233');
+  assert.equal(bodyElement.paragraphs[0].runs[0].bold, false);
+  assert.equal(bodyElement.paragraphs[0].runs[0].font, 'Template Body');
+  assert.equal(bodyElement.valign, 'mid');
+});

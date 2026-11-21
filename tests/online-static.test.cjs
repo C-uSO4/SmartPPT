@@ -32,7 +32,9 @@ test('在线静态构建包含完整浏览器生成链路且不依赖本地 API'
   assert.match(html, /在线使用 · 无需安装 · 默认本地处理/);
   assert.match(html, /id="templateInput" type="file" accept="\.pptx"/);
   assert.match(html, /id="aiAssist" type="checkbox"/);
-  assert.match(html, /文字块会经本站云端代理发送至 DeepSeek/);
+  assert.match(html, /文字角色发送至 DeepSeek 或 Kimi/);
+  assert.match(html, /阿里云百炼万相图片模型/);
+  assert.match(html, /不会发送已有图片或文件本体/);
   assert.match(html, /<th>PPT 页码<\/th>/);
   const engine = fs.readFileSync(path.join(root, 'dist', 'engine', 'engine.js'), 'utf8');
   const parser = fs.readFileSync(path.join(root, 'dist', 'engine', 'parser.js'), 'utf8');
@@ -50,6 +52,7 @@ test('在线静态构建包含完整浏览器生成链路且不依赖本地 API'
   const shell = fs.readFileSync(path.join(root, 'dist', 'assets', 'base.pptx'));
   assert.equal(shell.subarray(0, 2).toString(), 'PK');
   assert.ok(fs.statSync(path.join(root, 'api', 'analyze.js')).isFile());
+  assert.ok(fs.statSync(path.join(root, 'api', 'image.js')).isFile());
   const config = JSON.parse(fs.readFileSync(path.join(root, 'vercel.json'), 'utf8'));
   assert.equal(config.buildCommand, 'node scripts/build-online.cjs');
   assert.equal(config.outputDirectory, 'dist');

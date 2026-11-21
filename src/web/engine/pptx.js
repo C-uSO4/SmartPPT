@@ -286,7 +286,20 @@ function shapeById(document, id) {
   return shape || null;
 }
 
-function copyRunProperties(document, source, fontSize) {
+const RUN_PROPERTY_ORDER = [
+  'ln', 'noFill', 'solidFill', 'gradFill', 'blipFill', 'pattFill', 'grpFill',
+  'effectLst', 'effectDag', 'highlight', 'uLnTx', 'uLn', 'uFillTx', 'uFill',
+  'latin', 'ea', 'cs', 'sym', 'hlinkClick', 'hlinkMouseOver', 'rtl', 'extLst',
+];
+
+function insertRunProperty(properties, child) {
+  const order = RUN_PROPERTY_ORDER.indexOf(child.localName);
+  const next = Array.from(properties.childNodes).find(node => node.nodeType === 1
+    && RUN_PROPERTY_ORDER.indexOf(node.localName) > order);
+  properties.insertBefore(child, next || null);
+}
+
+function copyRunProperties(document, source, fontSize, slot) {
   const properties = document.createElementNS(A, 'a:rPr');
   if (source) {
     for (const attribute of Array.from(source.attributes)) properties.setAttribute(attribute.name, attribute.value);
@@ -294,41 +307,71 @@ function copyRunProperties(document, source, fontSize) {
   }
   properties.setAttribute('lang', properties.getAttribute('lang') || 'zh-CN');
   properties.setAttribute('dirty', '0');
-  if (Number.isFinite(fontSize)) properties.setAttribute('sz', String(Math.max(100, Math.round(fontSize * 100))));
+  if (slot?.bold !== null && slot?.bold !== undefined && !properties.hasAttribute('b')) {
+    properties.setAttribute('b', slot.bold ? '1' : '0');
+  }
+  const inheritedColor = /^#[0-9a-f]{6}$/i.test(slot?.color || '') ? slot.color.slice(1) : null;
+  if (inheritedColor && !directChild(properties, A, 'solidFill')) {
+    const fill = document.createElementNS(A, 'a:solidFill');
+    const color = document.createElementNS(A, 'a:srgbClr');
+    color.setAttribute('val', inheritedColor);
+    fill.appendChild(color);
+    insertRunProperty(properties, fill);
+  }
+  if (slot?.font) {
+    for (const name of ['latin', 'ea']) {
+      if (directChild(properties, A, name)) continue;
+      const font = document.createElementNS(A, `a:${name}`);
+      font.setAttribute('typeface', slot.font);
+      insertRunProperty(properties, font);
+    }
+  }
+  if (Number.isFinite(fontSize)) {
+    const sourceSize = Number(source?.getAttribute('sz')) / 100;
+    const resolvedSize = sourceSize > 0 ? Math.min(fontSize, sourceSize) : fontSize;
+    properties.setAttribute('sz', String(Math.max(100, Math.round(resolvedSize * 100))));
+  }
   return properties;
 }
 
-function replaceShapeText(document, shape, value, fontSize) {
+function replaceShapeText(document, shape, value, fontSize, slot = null) {
   const body = directChild(shape, P, 'txBody');
   if (!body) return false;
+  const bodyProperties = directChild(body, A, 'bodyPr');
+  const anchors = { mid: 'ctr', bottom: 'b', top: 't' };
+  if (bodyProperties && anchors[slot?.valign] && !bodyProperties.hasAttribute('anchor')) {
+    bodyProperties.setAttribute('anchor', anchors[slot.valign]);
+  }
   const paragraphs = Array.from(body.childNodes).filter(node => node.nodeType === 1 && node.namespaceURI === A && node.localName === 'p');
-  const model = paragraphs.find(paragraph => firstDescendant(paragraph, A, 'r')) || paragraphs[0] || null;
-  const paragraphProperties = directChild(model, A, 'pPr');
-  const runProperties = firstDescendant(model, A, 'rPr') || directChild(model, A, 'endParaRPr');
   paragraphs.forEach(paragraph => body.removeChild(paragraph));
   const lines = String(value ?? '').split('\n');
-  for (const line of lines) {
+  lines.forEach((line, index) => {
+    const model = paragraphs.length ? paragraphs[Math.min(index, paragraphs.length - 1)] : null;
+    let paragraphProperties = directChild(model, A, 'pPr');
+    const alignments = { center: 'ctr', right: 'r', left: 'l' };
+    if (alignments[slot?.align] && !paragraphProperties?.hasAttribute('algn')) {
+      if (!paragraphProperties) paragraphProperties = document.createElementNS(A, 'a:pPr');
+      paragraphProperties.setAttribute('algn', alignments[slot.align]);
+    }
+    const runProperties = model ? firstDescendant(model, A, 'rPr') || directChild(model, A, 'endParaRPr') : null;
     const paragraph = document.createElementNS(A, 'a:p');
     if (paragraphProperties) paragraph.appendChild(paragraphProperties.cloneNode(true));
     if (line) {
       const run = document.createElementNS(A, 'a:r');
-      run.appendChild(copyRunProperties(document, runProperties, fontSize));
+      run.appendChild(copyRunProperties(document, runProperties, fontSize, slot));
       const textNode = document.createElementNS(A, 'a:t');
       textNode.textContent = line;
       run.appendChild(textNode);
       paragraph.appendChild(run);
     } else if (runProperties) {
-      paragraph.appendChild(copyRunProperties(document, runProperties, fontSize));
-      const endProperties = paragraph.lastChild;
-      if (endProperties?.localName === 'rPr') {
-        const end = document.createElementNS(A, 'a:endParaRPr');
-        for (const attribute of Array.from(endProperties.attributes)) end.setAttribute(attribute.name, attribute.value);
-        for (const child of Array.from(endProperties.childNodes)) end.appendChild(child.cloneNode(true));
-        paragraph.replaceChild(end, endProperties);
-      }
+      const end = document.createElementNS(A, 'a:endParaRPr');
+      const properties = copyRunProperties(document, runProperties, fontSize, slot);
+      for (const attribute of Array.from(properties.attributes)) end.setAttribute(attribute.name, attribute.value);
+      for (const child of Array.from(properties.childNodes)) end.appendChild(child.cloneNode(true));
+      paragraph.appendChild(end);
     }
     body.appendChild(paragraph);
-  }
+  });
   return true;
 }
 
@@ -459,14 +502,14 @@ export async function renderTemplatePackage(job, templateBytes) {
     }
 
     const titleShape = shapeById(document, template.title.slot.id);
-    if (!titleShape || !replaceShapeText(document, titleShape, template.title.text, template.title.fontSize)) {
+    if (!titleShape || !replaceShapeText(document, titleShape, template.title.text, template.title.fontSize, template.title.slot)) {
       throw pptxError(`第 ${pageJob.number} 页模板标题槽位 ${template.title.slot.id} 不可用`);
     }
     for (const assignment of template.assignments) {
       const shape = shapeById(document, assignment.slot.id);
       if (!shape) throw pptxError(`第 ${pageJob.number} 页模板槽位 ${assignment.slot.id} 不存在`);
       if (assignment.kind === 'text' || assignment.kind === 'title') {
-        if (!replaceShapeText(document, shape, assignment.text, assignment.fontSize)) throw pptxError(`模板槽位 ${assignment.slot.id} 不是可编辑文字框`);
+        if (!replaceShapeText(document, shape, assignment.text, assignment.fontSize, assignment.slot)) throw pptxError(`模板槽位 ${assignment.slot.id} 不是可编辑文字框`);
       } else if (assignment.kind === 'image') {
         const picture = imageBytes({ asset: assignment.asset }, pageJob.number);
         picture.mediaName = `smartppt-slide${pageJob.number}-image${entries.filter(entry => entry.name.startsWith('ppt/media/smartppt-')).length + 1}${picture.extension}`;
