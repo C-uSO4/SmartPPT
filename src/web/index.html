@@ -50,7 +50,7 @@
         <button id="generateButton" class="generate-button" type="button" disabled>
           <span>生成智能美化 PPT</span><span class="arrow">→</span>
         </button>
-        <p class="limit-note">默认情况下，文件只在当前浏览器标签页内解析和生成；只有主动开启 AI 时，待分类文字块才会发送到云端模型服务。内容 PPTX 保留原页文字、表格行列和 PNG/JPEG/EMF 图片，但不保留其原始模板与动画；上传独立模板后，会从全部模板页挑选真实版面，保留所选页的母版、版式、装饰与媒体并填入内容。网页预览是槽位近似展示，下载稿保留模板原始页面尺寸；模板原始动画会替换为当前效果，不生成可复用母版。字体缺失时由 WPS 替换；EMF 需在下载后用 WPS 查看。</p>
+        <p class="limit-note">默认情况下，文件只在当前浏览器标签页内解析和生成；只有主动开启 AI 时，待分类文字块才会发送到云端模型服务。内容 PPTX 保留原页文字、表格行列和 PNG/JPEG/EMF 图片，但不保留其原始模板与动画；上传独立模板后，会从全部模板页挑选真实版面，保留所选页的母版、版式、装饰与媒体并填入内容。网页预览显示这些装饰及 PNG/JPEG 图片，复杂效果、裁剪、旋转和其他图片格式以 WPS 中的下载稿为准；下载稿保留模板原始页面尺寸，模板原始动画会替换为当前效果，不生成可复用母版。字体缺失时由 WPS 替换。</p>
 
         <ol id="pipeline" class="pipeline hidden">
           <li data-stage="parsing"><span></span><div>理解内容<small>标题、层级、数字与来源</small></div></li>
@@ -98,7 +98,7 @@
           </div>
           <div id="auditTab" class="tab-panel hidden">
             <div class="audit-summary"><span class="pass-dot"></span><strong id="auditSummary"></strong><span id="decorationSummary"></span></div>
-            <div class="table-wrap"><table><thead><tr><th>来源</th><th>原文</th><th>数字</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
+            <div class="table-wrap"><table><thead><tr><th>来源</th><th>PPT 页码</th><th>原文</th><th>数字</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
           </div>
           <div id="timingTab" class="tab-panel hidden">
             <div class="timing-intro"><h3>耗时花在真正需要的地方</h3><p>页面在当前浏览器标签页中直接编译为 OOXML，不经过本地生成服务或 Office MCP。所有数值均来自本次运行。</p></div>

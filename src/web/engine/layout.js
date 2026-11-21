@@ -254,24 +254,37 @@ function chooseLayout(section, index) {
 function splitItems(items) {
   if (!items.length) return [[]];
   const limit = items.some(item => codePointLength(item.text) > 120) ? 2 : 4;
+  const units = [];
+  for (let index = 0; index < items.length; index += 1) {
+    if (items[index].kind === 'heading' && index + 1 < items.length) {
+      units.push([items[index], items[index + 1]]);
+      index += 1;
+    } else {
+      units.push([items[index]]);
+    }
+  }
   const chunks = [];
   let current = [];
+  let itemCount = 0;
   let length = 0;
-  for (const item of items) {
-    const itemLength = codePointLength(item.text);
-    if (current.length && (current.length >= limit || length + itemLength > 330)) {
+  for (const unit of units) {
+    const unitLength = unit.reduce((total, item) => total + codePointLength(item.text), 0);
+    if (current.length && (itemCount + unit.length > limit || length + unitLength > 330)) {
       chunks.push(current);
       current = [];
+      itemCount = 0;
       length = 0;
     }
-    current.push(item);
-    length += itemLength;
+    current.push(unit);
+    itemCount += unit.length;
+    length += unitLength;
   }
   if (current.length) chunks.push(current);
-  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1 && chunks[chunks.length - 2].length > 2) {
+  if (chunks.length > 1 && chunks[chunks.length - 1].length === 1 && chunks[chunks.length - 1][0].length === 1
+      && chunks[chunks.length - 2].length > 1 && chunks[chunks.length - 2].at(-1).length === 1) {
     chunks[chunks.length - 1].unshift(chunks[chunks.length - 2].pop());
   }
-  return chunks;
+  return chunks.map(chunk => chunk.flat());
 }
 
 function basePage(titleValue, pageNumber, sectionIndex, sectionCount, motion, fade, visualPage = null) {
@@ -836,6 +849,12 @@ function selectTemplateAssignment(plan, items, visualTemplate) {
 
 function templatePreviewPage(selection, visualPage) {
   const elements = backgroundElements(visualPage);
+  const replacedShapeIds = new Set(selection.assignments
+    .filter(assignment => ['image', 'table'].includes(assignment.kind))
+    .map(assignment => assignment.slot.id));
+  for (const decoration of visualPage.decorations || []) {
+    if (!replacedShapeIds.has(decoration.templateShapeId)) elements.push(decoration);
+  }
   const fade = [];
   const all = [selection.titleAssignment, ...selection.assignments];
   for (const assignment of all) {
@@ -874,11 +893,10 @@ export function planPages(model, style = 'paper', visualTemplate = null) {
   const sourceOverview = importedOverview
     ? { source: importedOverview, sections: model.chapters, count_text: null }
     : matchedSourceOverview(model);
-  const sourceOverviewTitle = Boolean(model.sections.length && /^(?:内容结构|目录|大纲|CONTENTS)$/i.test(model.sections[0].title));
   const contentSections = sourceOverview ? model.sections.filter(section => section !== sourceOverview.source) : model.sections;
   const overviewSections = sourceOverview ? sourceOverview.sections : contentSections;
-  if (sourceOverview || (contentSections.length >= 3 && !sourceOverviewTitle)) {
-    const overviewTitle = sourceOverview ? sourceOverview.source.title : '内容结构';
+  if (sourceOverview) {
+    const overviewTitle = sourceOverview.source.title;
     for (let start = 0; start < overviewSections.length; start += 6) {
       const chunk = overviewSections.slice(start, start + 6);
       const sourceIds = chunk.filter(section => section.heading_id).map(section => section.heading_id);
@@ -933,7 +951,7 @@ export function planPages(model, style = 'paper', visualTemplate = null) {
   const pages = [];
   plans.forEach((plan, planIndex) => {
     const pageNumber = planIndex + 1;
-    const visualPage = visualTemplate
+    let visualPage = visualTemplate
       ? (plan.kind === 'cover' ? visualTemplate.cover : visualTemplate.content)
       : null;
     THEME = visualPage ? templateTheme(baseTheme, visualPage, visualTemplate) : { ...baseTheme };
@@ -942,6 +960,8 @@ export function planPages(model, style = 'paper', visualTemplate = null) {
     let page;
     if (visualTemplate) {
       const selection = selectTemplateAssignment(plan, templatePlanItems(plan, model), visualTemplate);
+      visualPage = selection.candidate.visual || visualPage;
+      THEME = templateTheme(baseTheme, visualPage, visualTemplate);
       plan.template = {
         slidePart: selection.candidate.slidePart,
         title: selection.titleAssignment,

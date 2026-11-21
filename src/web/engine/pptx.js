@@ -654,8 +654,8 @@ export async function verifyPackage(pptxBytes, job) {
   return true;
 }
 
-/** Match normalized source blocks against all DrawingML text in slide-number order. */
-export async function auditPackage(pptxBytes, model) {
+/** Match each source block against its assigned slides, or the whole deck without a job. */
+export async function auditPackage(pptxBytes, model, job = null) {
   if (!model || !Array.isArray(model.blocks)) throw pptxError('model.blocks 必须是原文块数组');
   const archive = await readZip(pptxBytes);
   const slideNames = archive.names().filter(name => slideNumber(name) >= 0).sort((left, right) => slideNumber(left) - slideNumber(right));
@@ -665,15 +665,29 @@ export async function auditPackage(pptxBytes, model) {
     slideTexts.push(clean(elementsNs(document, A, 't').map(node => node.textContent || '').join(' ')));
   }
   const allText = clean(slideTexts.join(' '));
+  const expectedPages = new Map();
+  for (const page of job?.pages || []) {
+    for (const id of page.plan?.source_ids || []) {
+      if (!expectedPages.has(id)) expectedPages.set(id, []);
+      expectedPages.get(id).push(page.number);
+    }
+  }
   const missing = [];
   const auditedBlocks = model.blocks.filter(item => item.audit !== false);
   for (const item of auditedBlocks) {
-    if (!allText.includes(clean(item.text))) missing.push({ id: item.id, text: item.text, source: item.source });
+    const value = clean(item.text);
+    const assigned = job ? expectedPages.get(item.id) || [] : [];
+    const matched = job
+      ? assigned.some(number => slideTexts[number - 1]?.includes(value))
+      : allText.includes(value);
+    if (!matched) missing.push({ id: item.id, text: item.text, source: item.source, expected_pages: assigned });
   }
   return {
     source_blocks: auditedBlocks.length,
     matched_blocks: auditedBlocks.length - missing.length,
     missing_blocks: missing,
     slides: slideNames.length,
+    per_page: Boolean(job),
+    page_map: Object.fromEntries(expectedPages),
   };
 }

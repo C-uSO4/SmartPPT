@@ -96,6 +96,47 @@ test('完整句子不会被文本规则或 PPTX 页面分组提升为标题', as
   assert.equal(model.sections[0].items[0].kind, 'paragraph');
 });
 
+test('Markdown 多行备注与注释块不会混入幻灯片正文', async () => {
+  const { parser } = await loadModules();
+  const source = [
+    '# 标题', '开场正文', '备注：第一行讲稿', '第二行**讲稿**',
+    '## 第一章', '章节正文', '<!--', '多行注释', '-->',
+    '### 小节', '小节正文', ':::notes', '讲稿块', ':::',
+    '## 第二章', '第二章正文', '',
+  ].join('\n');
+  const { blocks, notes } = await parser.parseDocument('notes.md', new TextEncoder().encode(source));
+  assert.deepEqual(blocks.map(item => item.text), [
+    '标题', '开场正文', '第一章', '章节正文', '小节', '小节正文', '第二章', '第二章正文',
+  ]);
+  assert.deepEqual(notes.map(item => item.text), ['第一行讲稿', '第二行讲稿', '多行注释', '讲稿块']);
+  await assert.rejects(
+    parser.parseDocument('broken-notes.md', new TextEncoder().encode('# 标题\n::: notes\n未闭合讲稿')),
+    /备注块缺少结束标记/,
+  );
+});
+
+test('Markdown 分页不擅自增加目录且小标题与后续正文同页', async () => {
+  const { parser, layout } = await loadModules();
+  const source = [
+    '# 汇报', '## 第一章', '第一章正文',
+    '## 第二章', '第二点一', '第二点二', '### 小节标题', '小节正文', '第二点五',
+    '## 第三章', '第三章正文',
+  ].join('\n\n');
+  const { blocks } = await parser.parseDocument('pages.md', new TextEncoder().encode(source));
+  const model = parser.makeModel('pages.md', blocks);
+  const pages = layout.planPages(model);
+  assert.equal(pages.some(page => page.plan.kind === 'overview'), false);
+  assert.deepEqual(pages.map(page => page.plan.title), ['汇报', '第一章', '第二章', '第二章（续）', '第三章']);
+  const sectionPages = pages.filter(page => page.plan.title.startsWith('第二章'));
+  assert.ok(sectionPages.every(page => page.plan.items.at(-1)?.kind !== 'heading'));
+  const subheadingPage = sectionPages.find(page => page.plan.items.some(item => item.text === '小节标题'));
+  assert.ok(subheadingPage.plan.items.some(item => item.text === '小节正文'));
+  for (const page of sectionPages) {
+    const sourceLines = page.plan.source_ids.map(id => blocks.find(block => block.id === id).source.line);
+    assert.ok(Math.min(...sourceLines) >= 7 && Math.max(...sourceLines) <= 17);
+  }
+});
+
 test('PPTX 主章节、完整小标题与原始正文段落保持边界', async () => {
   const { parser, layout } = await loadModules();
   const { model } = importedModel(parser.makeModel);
@@ -228,6 +269,10 @@ test('模板内容分配到真实页面槽位且保留背景预览', async () =>
     content: {
       background: '#F4F1E8', image: null, imageLuminance: null,
       colors: { lt1: '#FFFFFF', dk1: '#102A43', accent1: '#FF6600', accent2: '#00A389' },
+      decorations: [
+        { type: 'shape', shape: 'rect', x: 20, y: 20, w: 30, h: 30, fill: '#FF6600', templateShapeId: 'master-decoration' },
+        { type: 'image', asset, x: 1080, y: 40, w: 120, h: 68, fit: 'fill', templateShapeId: 'layout-picture' },
+      ],
     },
     candidates: [
       {
@@ -264,6 +309,11 @@ test('模板内容分配到真实页面槽位且保留背景预览', async () =>
   const body = pages[1].page.elements.find(element => element.type === 'text'
     && element.paragraphs[0]?.runs[0]?.text === '正文保持原生可编辑。');
   assert.equal(pages[1].page.background, '#F4F1E8');
+  assert.equal(pages[1].page.elements[1].fill, '#FF6600');
+  assert.equal(pages[1].page.elements[2].type, 'image');
+  assert.equal(pages[1].page.elements[2].asset, asset);
+  assert.ok(pages[1].page.elements.findIndex(element => element === contentTitle) > 2,
+    '模板装饰应先于新标题和正文绘制');
   assert.equal(contentTitle.paragraphs[0].runs[0].font, 'Template Title');
   assert.equal(contentTitle.paragraphs[0].runs[0].color, '#102A43');
   assert.equal(body.paragraphs[0].runs[0].font, 'Template Body');

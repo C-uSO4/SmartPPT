@@ -365,13 +365,15 @@ function renderResult(result, pptxBytes) {
   renderSlide(0);
 
   const missing = new Set((result.fidelity.missing_blocks || []).map(item => item.id));
-  $('auditSummary').textContent = `${result.fidelity.matched_blocks} / ${result.fidelity.source_blocks} 条原文已在 PPTX 中回读匹配`;
+  $('auditSummary').textContent = `${result.fidelity.matched_blocks} / ${result.fidelity.source_blocks} 条原文已在指定 PPT 页回读匹配`;
   $('decorationSummary').textContent = `另识别 ${result.decorationCount} 条重复页眉、页码等装饰，不参与正文对账`;
   const rows = $('auditRows');
   rows.replaceChildren();
   result.blocks.forEach(block => {
     const row = document.createElement('tr');
-    [sourceLabel(block), block.text, (block.numbers || []).join('、') || '—', missing.has(block.id) ? '缺失' : '已匹配'].forEach(value => {
+    const assignedPages = result.fidelity.page_map?.[block.id] || [];
+    const pageLabel = assignedPages.length ? assignedPages.map(number => `第 ${number} 页`).join('、') : '—';
+    [sourceLabel(block), pageLabel, block.text, (block.numbers || []).join('、') || '—', missing.has(block.id) ? '缺失' : '已匹配'].forEach(value => {
       const cell = document.createElement('td');
       cell.textContent = value;
       row.appendChild(cell);

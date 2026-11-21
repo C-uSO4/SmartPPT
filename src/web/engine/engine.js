@@ -115,7 +115,7 @@ export async function generateDeck({
   await verifyPackage(bytes, job);
   const verifySeconds = elapsed(verifyStarted);
   const auditStarted = performance.now();
-  const fidelity = await auditPackage(bytes, model);
+  const fidelity = await auditPackage(bytes, model, job);
   const auditSeconds = elapsed(auditStarted);
   fidelity.seconds = auditSeconds;
 
@@ -135,7 +135,7 @@ export async function generateDeck({
       layoutCount: visualTemplate.candidates.length,
       usedLayoutCount: new Set(pages.map(page => page.plan.template.slidePart)).size,
       warnings: visualTemplate.warnings,
-      limitations: '下载稿保留所选模板页的母版、版式、装饰与媒体；网页预览为真实槽位的近似展示。模板原始动画会替换为当前切换与入场效果，不生成可复用母版。',
+      limitations: '下载稿保留所选模板页的母版、版式、装饰与媒体；网页预览同步显示这些装饰及 PNG/JPEG 图片，复杂效果、裁剪和旋转仍以 WPS 中的下载稿为准。模板原始动画会替换为当前切换与入场效果，不生成可复用母版。',
     } : null,
     noteCount: notes.length,
     pageCount: pages.length,

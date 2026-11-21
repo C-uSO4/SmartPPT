@@ -107,7 +107,7 @@ export function markdownInlineText(value) {
 }
 
 function explicitNote(text) {
-  const match = String(text).match(/^(?:备注|讲稿|演讲备注|注释|notes?)\s*[:：]\s*(.+)$/i);
+  const match = String(text).match(/^(?:备注|讲稿|演讲备注|注释|notes?)\s*[:：]\s*(.*)$/i);
   return match ? match[1] : null;
 }
 
@@ -363,6 +363,10 @@ function parseMarkdown(filename, bytes, assets) {
   let paragraphStart = 1;
   let inCode = false;
   let inNotes = false;
+  let noteStart = 0;
+  let inComment = false;
+  let commentStart = 0;
+  let inExplicitNotes = false;
   let inFormula = false;
   let formulaLines = [];
   let formulaStart = 0;
@@ -402,15 +406,42 @@ function parseMarkdown(filename, bytes, assets) {
       index += 1;
       continue;
     }
-    if (['::: notes', '::: note', '::: 备注'].includes(text.toLowerCase())) {
-      flushParagraph();
-      inNotes = true;
+    if (inNotes) {
+      if (text === ':::') {
+        inNotes = false;
+      } else if (text) {
+        const value = markdownInlineText(text.replace(/^>\s*/, ''));
+        if (value) blocks.push(block('note', value, { line: number }));
+      }
       index += 1;
       continue;
     }
-    if (inNotes) {
-      if (text === ':::') inNotes = false;
-      else if (text) blocks.push(block('note', text, { line: number }));
+    if (inComment) {
+      const end = text.indexOf('-->');
+      const value = markdownInlineText(end >= 0 ? text.slice(0, end) : text);
+      if (value) blocks.push(block('note', value, { line: number }));
+      if (end >= 0) inComment = false;
+      index += 1;
+      continue;
+    }
+    if (inExplicitNotes) {
+      if (!text) {
+        inExplicitNotes = false;
+        index += 1;
+        continue;
+      }
+      if (!/^(?:#{1,6})(?:\s+|(?=[\u4e00-\u9fff]))/u.test(text)) {
+        const value = markdownInlineText(text.replace(/^>\s*/, ''));
+        if (value) blocks.push(block('note', value, { line: number }));
+        index += 1;
+        continue;
+      }
+      inExplicitNotes = false;
+    }
+    if (/^:::\s*(?:notes?|备注)\s*$/i.test(text)) {
+      flushParagraph();
+      inNotes = true;
+      noteStart = number;
       index += 1;
       continue;
     }
@@ -423,17 +454,27 @@ function parseMarkdown(filename, bytes, assets) {
     const comment = text.match(/^<!--\s*(.*?)\s*-->$/);
     if (comment) {
       flushParagraph();
-      if (comment[1]) blocks.push(block('note', comment[1], source));
+      if (comment[1]) blocks.push(block('note', markdownInlineText(comment[1]), source));
       index += 1;
       continue;
     }
-    const quoted = text.match(/^>\s*(.+)$/);
+    if (text.startsWith('<!--')) {
+      flushParagraph();
+      inComment = true;
+      commentStart = number;
+      const value = markdownInlineText(text.slice(4));
+      if (value) blocks.push(block('note', value, source));
+      index += 1;
+      continue;
+    }
+    const quoted = text.match(/^>\s*(.*)$/);
     if (quoted) text = quoted[1];
     const note = explicitNote(text);
     if (note !== null) {
       flushParagraph();
       const value = markdownInlineText(note);
       if (value) blocks.push(block('note', value, source));
+      inExplicitNotes = true;
       index += 1;
       continue;
     }
@@ -494,6 +535,8 @@ function parseMarkdown(filename, bytes, assets) {
   }
   flushParagraph();
   if (inFormula) throw new Error(`第 ${formulaStart} 行公式缺少结束标记 $$`);
+  if (inNotes) throw new Error(`第 ${noteStart} 行备注块缺少结束标记 :::`);
+  if (inComment) throw new Error(`第 ${commentStart} 行注释块缺少结束标记 -->`);
   return blocks;
 }
 
@@ -1098,6 +1141,53 @@ async function templatePartBackground(archive, entry, pageSize, colors, colorMap
   return { color, image };
 }
 
+function templateTextDetails(shape, colors, colorMap) {
+  const runProperties = descendants(shape, A, 'rPr')[0]
+    || descendants(shape, A, 'defRPr')[0]
+    || descendants(shape, A, 'endParaRPr')[0]
+    || null;
+  const color = colorFromNode(findPath(runProperties, [[A, 'solidFill']]), colors, colorMap);
+  const eastAsian = firstDescendant(runProperties, A, 'ea');
+  const latin = firstDescendant(runProperties, A, 'latin');
+  const font = safeTypeface(eastAsian?.getAttribute('typeface')) || safeTypeface(latin?.getAttribute('typeface'));
+  const paragraph = findPath(shape, [[P, 'txBody'], [A, 'p']]);
+  const paragraphProperties = findPath(paragraph, [[A, 'pPr']]);
+  const alignments = { ctr: 'center', r: 'right', l: 'left' };
+  const bodyProperties = findPath(shape, [[P, 'txBody'], [A, 'bodyPr']]);
+  const anchors = { ctr: 'mid', b: 'bottom' };
+  return {
+    text: shapeText(shape).join('\n'),
+    fontSize: shapeFontSize(shape) || 16,
+    color,
+    bold: runProperties?.getAttribute('b') === '1',
+    align: alignments[paragraphProperties?.getAttribute('algn')] || 'left',
+    valign: anchors[bodyProperties?.getAttribute('anchor')] || 'top',
+    font,
+  };
+}
+
+function templateShapeStyle(shape, colors, colorMap) {
+  const properties = findPath(shape, [[P, 'spPr']]);
+  const geometry = findPath(properties, [[A, 'prstGeom']])?.getAttribute('prst') || 'rect';
+  const supported = ['rect', 'roundRect', 'ellipse', 'donut', 'line'];
+  let fill = '#00000000';
+  const solidFill = findPath(properties, [[A, 'solidFill']]);
+  const fillReference = findPath(shape, [[P, 'style'], [A, 'fillRef']]);
+  if (solidFill) {
+    fill = colorFromNode(solidFill, colors, colorMap) || fill;
+  } else if (!findPath(properties, [[A, 'noFill']]) && integerValue(fillReference?.getAttribute('idx')) > 0) {
+    fill = colorFromNode(fillReference, colors, colorMap) || fill;
+  }
+  const line = findPath(properties, [[A, 'ln']]);
+  const lineFill = findPath(line, [[A, 'solidFill']]);
+  const lineReference = findPath(shape, [[P, 'style'], [A, 'lnRef']]);
+  const lineColor = colorFromNode(lineFill || lineReference, colors, colorMap);
+  const stroke = lineColor && !findPath(line, [[A, 'noFill']])
+    ? { color: lineColor, widthPt: Math.max(0.25, integerValue(line?.getAttribute('w'), 12700) / 12700) }
+    : null;
+  return { shape: supported.includes(geometry) ? geometry : 'rect', fill, stroke };
+}
+
 export async function parseVisualTemplate(templateBytes) {
   const archive = await readZip(templateBytes);
   const slides = await presentationSlides(archive);
@@ -1150,12 +1240,12 @@ export async function parseVisualTemplate(templateBytes) {
         try {
           const asset = makeAsset(pathBasename(relation.target), await archive.bytes(relation.target));
           if (!['.png', '.jpg'].includes(asset.extension)) {
-            warn('模板背景仅支持 PNG/JPEG，其他图片格式已跳过。');
+            warn('网页预览仅支持 PNG/JPEG 模板图片；其他格式仍保留在下载稿中。');
             return null;
           }
           return { asset, luminance: await imageLuminance(asset) };
         } catch {
-          warn('模板中有无法读取的背景图片，已跳过该图片。');
+          warn('模板中有无法读取的图片，已从网页预览跳过；下载稿不受影响。');
           return null;
         }
       })());
@@ -1194,17 +1284,98 @@ export async function parseVisualTemplate(templateBytes) {
       : null;
     const themeBackground = theme.colors[colorMap.bg1] || theme.colors.lt1 || null;
     return {
-      background: selected.color || inherited || themeBackground,
-      image: selected.image?.asset || null,
-      imageLuminance: selected.image?.luminance ?? null,
-      colors: theme.colors,
-      fonts: theme.fonts,
+      reference: {
+        background: selected.color || inherited || themeBackground,
+        image: selected.image?.asset || null,
+        imageLuminance: selected.image?.luminance ?? null,
+        colors: theme.colors,
+        fonts: theme.fonts,
+      },
+      chain,
+      colorMap,
     };
+  }
+
+  async function collectDecorations(entry, inherited, contentIds, reference, colorMap) {
+    if (!entry) return [];
+    const elements = [];
+    const parents = new Map();
+    for (const parent of walk(entry.root)) {
+      for (const child of childElements(parent)) parents.set(child, parent);
+    }
+    for (const shape of walk(entry.root)) {
+      if (!matches(shape, P, 'sp') && !matches(shape, P, 'pic') && !matches(shape, P, 'cxnSp')) continue;
+      const properties = firstDescendant(shape, P, 'cNvPr');
+      if (!properties || properties.getAttribute('hidden') === '1') continue;
+      if (inherited && firstDescendant(shape, P, 'ph')) continue;
+      const id = properties.getAttribute('id') || '';
+      const contentShape = !inherited && contentIds.has(id);
+      if (contentShape && !matches(shape, P, 'sp')) continue;
+      const bounds = shapeBounds(shape, parents);
+      if (bounds.width < 0 || bounds.height < 0 || (bounds.width === 0 && bounds.height === 0)) continue;
+      const base = { templateShapeId: id, templateSource: inherited ? 'inherited' : 'slide' };
+      if (matches(shape, P, 'pic')) {
+        if (bounds.width <= 0 || bounds.height <= 0) continue;
+        const loaded = await loadImage(entry, firstDescendant(shape, A, 'blip'));
+        if (!loaded) continue;
+        const pageWidth = pageSize.width / 9525;
+        const pageHeight = pageSize.height / 9525;
+        const fullPage = bounds.left <= pageWidth * 0.03 && bounds.top <= pageHeight * 0.03
+          && bounds.left + bounds.width >= pageWidth * 0.97
+          && bounds.top + bounds.height >= pageHeight * 0.97;
+        if (fullPage && loaded.asset === reference.image) continue;
+        elements.push({
+          ...base, type: 'image', asset: loaded.asset,
+          alt: properties.getAttribute('descr') || properties.getAttribute('name') || '模板图片',
+          x: bounds.left, y: bounds.top, w: bounds.width, h: bounds.height,
+          fit: 'fill', templateDecoration: true,
+        });
+        continue;
+      }
+      const style = templateShapeStyle(shape, reference.colors, colorMap);
+      if (style.fill !== '#00000000' || style.stroke) {
+        elements.push({
+          ...base, type: 'shape', shape: style.shape,
+          x: bounds.left, y: bounds.top, w: Math.max(1, bounds.width), h: Math.max(1, bounds.height),
+          fill: style.fill, ...(style.stroke ? { stroke: style.stroke } : {}),
+          templateDecoration: true,
+        });
+      }
+      const blipFill = findPath(shape, [[P, 'spPr'], [A, 'blipFill']]);
+      if (blipFill) {
+        const loaded = await loadImage(entry, firstDescendant(blipFill, A, 'blip'));
+        if (loaded) {
+          elements.push({
+            ...base, type: 'image', asset: loaded.asset, alt: '模板形状图片',
+            x: bounds.left, y: bounds.top, w: bounds.width, h: bounds.height,
+            fit: 'fill', templateDecoration: true,
+          });
+        }
+      }
+      if (contentShape) continue;
+      const details = templateTextDetails(shape, reference.colors, colorMap);
+      if (!details.text) continue;
+      elements.push({
+        ...base, type: 'text', x: bounds.left, y: bounds.top, w: bounds.width, h: bounds.height,
+        valign: details.valign,
+        paragraphs: details.text.split('\n').map(value => ({
+          align: details.align, lineSpacingPct: 110, spaceAfterPt: 0, bullet: false,
+          runs: [{
+            text: value, sizePt: details.fontSize, bold: details.bold, italic: false,
+            color: details.color || reference.colors[colorMap.tx1] || reference.colors.dk1 || '#142B33',
+            font: details.font || reference.fonts.body || 'Microsoft YaHei',
+          }],
+        })),
+        templateDecoration: true,
+      });
+    }
+    return elements;
   }
 
   const candidates = [];
   for (let slideIndex = 0; slideIndex < slides.length; slideIndex += 1) {
     const entry = await loadPart(slides[slideIndex]);
+    const resolved = await resolveReference(slides[slideIndex]);
     const parents = new Map();
     for (const parent of walk(entry.root)) {
       for (const child of childElements(parent)) parents.set(child, parent);
@@ -1256,19 +1427,28 @@ export async function parseVisualTemplate(templateBytes) {
       .filter(frame => firstDescendant(frame, A, 'tbl'))
       .map(frame => makeSlot(frame, 'table')).filter(Boolean);
     contentTextIds.push(...tableSlots.map(slot => slot.id));
+    const title = titleShape ? makeSlot(titleShape, 'title') : null;
+    const contentIds = new Set([...(title ? [title.id] : []), ...contentTextIds]);
+    const decorations = [];
+    for (const [chainIndex, part] of [[2, resolved.chain[2]], [1, resolved.chain[1]], [0, resolved.chain[0]]]) {
+      decorations.push(...await collectDecorations(
+        part, chainIndex !== 0, contentIds, resolved.reference, resolved.colorMap,
+      ));
+    }
     candidates.push({
       slidePart: slides[slideIndex],
       slideNumber: slideIndex + 1,
-      title: titleShape ? makeSlot(titleShape, 'title') : null,
+      title,
       bodySlots,
       pictureSlots,
       tableSlots,
       contentTextIds,
+      visual: { ...resolved.reference, decorations },
     });
   }
 
-  const cover = await resolveReference(slides[0]);
-  const content = await resolveReference(slides[1] || slides[0]);
+  const cover = candidates[0].visual;
+  const content = candidates[1]?.visual || cover;
   return {
     cover,
     content,
