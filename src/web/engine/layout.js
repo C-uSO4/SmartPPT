@@ -281,7 +281,7 @@ function splitItems(items) {
   }
   if (current.length) chunks.push(current);
   if (chunks.length > 1 && chunks[chunks.length - 1].length === 1 && chunks[chunks.length - 1][0].length === 1
-      && chunks[chunks.length - 2].length > 1 && chunks[chunks.length - 2].at(-1).length === 1) {
+      && chunks[chunks.length - 2].length > 1) {
     chunks[chunks.length - 1].unshift(chunks[chunks.length - 2].pop());
   }
   return chunks.map(chunk => chunk.flat());

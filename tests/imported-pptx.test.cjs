@@ -99,7 +99,8 @@ test('完整句子不会被文本规则或 PPTX 页面分组提升为标题', as
 test('Markdown 多行备注与注释块不会混入幻灯片正文', async () => {
   const { parser } = await loadModules();
   const source = [
-    '# 标题', '开场正文', '备注：第一行讲稿', '第二行**讲稿**',
+    '# 标题', '开场正文', '备注：第一行讲稿', '第二行**讲稿**', '',
+    '**备注：加粗讲稿**', '加粗备注续行', '', '- 备注：列表讲稿', '列表备注续行', '',
     '## 第一章', '章节正文', '<!--', '多行注释', '-->',
     '### 小节', '小节正文', ':::notes', '讲稿块', ':::',
     '## 第二章', '第二章正文', '',
@@ -108,7 +109,9 @@ test('Markdown 多行备注与注释块不会混入幻灯片正文', async () =>
   assert.deepEqual(blocks.map(item => item.text), [
     '标题', '开场正文', '第一章', '章节正文', '小节', '小节正文', '第二章', '第二章正文',
   ]);
-  assert.deepEqual(notes.map(item => item.text), ['第一行讲稿', '第二行讲稿', '多行注释', '讲稿块']);
+  assert.deepEqual(notes.map(item => item.text), [
+    '第一行讲稿', '第二行讲稿', '加粗讲稿', '加粗备注续行', '列表讲稿', '列表备注续行', '多行注释', '讲稿块',
+  ]);
   await assert.rejects(
     parser.parseDocument('broken-notes.md', new TextEncoder().encode('# 标题\n::: notes\n未闭合讲稿')),
     /备注块缺少结束标记/,
@@ -129,8 +132,9 @@ test('Markdown 分页不擅自增加目录且小标题与后续正文同页', as
   assert.deepEqual(pages.map(page => page.plan.title), ['汇报', '第一章', '第二章', '第二章（续）', '第三章']);
   const sectionPages = pages.filter(page => page.plan.title.startsWith('第二章'));
   assert.ok(sectionPages.every(page => page.plan.items.at(-1)?.kind !== 'heading'));
-  const subheadingPage = sectionPages.find(page => page.plan.items.some(item => item.text === '小节标题'));
-  assert.ok(subheadingPage.plan.items.some(item => item.text === '小节正文'));
+  assert.deepEqual(sectionPages.map(page => page.plan.items.map(item => item.text)), [
+    ['第二点一', '第二点二'], ['小节标题', '小节正文', '第二点五'],
+  ]);
   for (const page of sectionPages) {
     const sourceLines = page.plan.source_ids.map(id => blocks.find(block => block.id === id).source.line);
     assert.ok(Math.min(...sourceLines) >= 7 && Math.max(...sourceLines) <= 17);

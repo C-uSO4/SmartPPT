@@ -507,12 +507,13 @@ function parseMarkdown(filename, bytes, assets) {
     }
     const quoted = text.match(/^>\s*(.*)$/);
     if (quoted) text = quoted[1];
-    const classified = directive(text);
+    const directiveText = markdownInlineText(text).replace(/^(?:[-*+]|\d{1,9}[.)、])\s+/, '');
+    const classified = /^!?\[/.test(text) ? null : directive(directiveText);
     if (classified) {
       flushParagraph();
       const value = markdownInlineText(classified.text);
       if (value) blocks.push(block(classified.kind, value, source));
-      explicitKind = explicitDirective(text) ? classified.kind : null;
+      explicitKind = explicitDirective(directiveText) ? classified.kind : null;
       index += 1;
       continue;
     }
